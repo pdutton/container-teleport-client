@@ -1,0 +1,98 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+# Cancel superseded pull-request runs, but let a master push finish -- a
+# cancellation mid-push would leave the tag set half-updated in the registry.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+
+    steps:
+      # v7 runs on Node.js 24. v4 targets Node.js 20, which is deprecated, and
+      # the runner forces it onto 24 anyway while warning on every job.
+      - uses: actions/checkout@v7
+
+      # Default checkout depth is fine: the Makefile's `git rev-parse HEAD`
+      # works at depth 1.
+
+      - name: Ensure podman
+        run: |
+          if ! command -v podman >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y podman
+          fi
+          # The Makefile defaults to absolute tool paths; fail loudly here
+          # rather than with a confusing "no such file" mid-build.
+          test -x /usr/bin/podman
+          test -x /usr/bin/awk
+          podman --version
+
+      # Publishing happens only from master. A dispatch against another branch
+      # still builds and smoke-tests, so a branch can be put through CI, but it
+      # must never overwrite the shared mutable tags (latest, 18, 18.10) with
+      # unreviewed code. This condition is the exact negation of the publish
+      # condition below -- if it were merely the pull_request check, a dispatch
+      # from a feature branch would match no step at all and the job would
+      # silently pass having done nothing.
+      - name: Build and smoke-test
+        if: github.event_name == 'pull_request' || github.ref != 'refs/heads/master'
+        run: make test
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: printf '%s' "$DOCKERHUB_TOKEN" | podman login docker.io -u "$DOCKERHUB_USERNAME" --password-stdin
+
+      # One invocation, not two: push depends on test which depends on build, so
+      # this builds, smoke-tests and publishes. Running `make test` in a separate
+      # step first would repeat the whole chain -- these targets are .PHONY and
+      # match no real file, so make re-runs them on every invocation.
+      - name: Build, smoke-test, and push
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        run: make push
+
+  # Docker Hub reads nothing from this repo on its own, so the overview page
+  # would drift from DOCKERHUB-OVERVIEW.md the moment either is edited alone.
+  # Same master-only guard as the publish steps: the page is shared by every
+  # consumer and a branch build must not rewrite it.
+  description:
+    name: dockerhub-description
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The short description is set here too, so the whole Hub page is
+      # declarative -- leaving it unset would silently preserve whatever was
+      # last typed into the web UI.
+      # Pinned by SHA, not by tag: this is the only third-party action here and
+      # it is handed a Docker Hub token with write/delete scope. A tag is a
+      # mutable pointer in someone else's repository -- repointing v5 would run
+      # new code against that secret with no change on this side.
+      # actions/checkout stays on a major tag; it is inside GitHub's own trust
+      # boundary.
+      - uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: pdutton/teleport-client
+          readme-filepath: ./DOCKERHUB-OVERVIEW.md
+          short-description: "Teleport Community Edition client (tsh), ready to run without installing it"
