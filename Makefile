@@ -3,13 +3,18 @@ IMAGE    ?= teleport-client
 # The Teleport version this image pins. Written here AND as ARG
 # TELEPORT_VERSION in the Containerfile, deliberately independent: this copy is
 # only ever handed to the smoke test as EXPECT_VERSION, and is never passed as a
-# --build-arg. If it were, the two could not disagree and the smoke test's
-# version assertion would be vacuous.
+# --build-arg. If it were, the two could still not disagree -- but the
+# assertion would still be meaningful: EXPECT_VERSION is checked against what
+# the binary itself reports, which verifies the tarball at that URL really
+# contains a `tsh` reporting that version and that the extraction pulled the
+# right archive member. What the split buys is narrower and still real: it
+# catches a human editing one file and not the other.
 #
 # So editing one alone does NOT break `podman build` -- the image builds fine --
 # it breaks `make test`. That is the safety net working, not a bug. Bumping the
-# pin means editing both, plus the version named in README.md, which nothing
-# cross-checks.
+# pin means editing this, the ARG TELEPORT_VERSION and the two per-architecture
+# ARG TELEPORT_SHA256_* digests in the Containerfile, and the version named in
+# README.md (checked by `make test`, see below).
 TELEPORT_VERSION := 18.10.4
 
 # External tools, overridable: `make PODMAN=/usr/local/bin/podman build`
@@ -31,9 +36,10 @@ REGISTRY ?= docker.io/pdutton
 # itself. `=` (recursive), not `:=`, so this still tracks an overridden IMAGE.
 LOCAL_IMAGE = localhost/$(IMAGE)
 
-# Extra flags for the build, empty by default. The version is pinned, so unlike
-# the sibling repos a plain rebuild is already reproducible; this exists for
-# refreshing the base images:
+# Extra flags for the build, empty by default. The version is pinned and the
+# tarball is verified against a per-architecture digest recorded in the
+# Containerfile (not just the same-host .sha256), so a rebuild fetches and
+# checks the same bytes every time; this exists for refreshing the base images:
 #
 #   make build PODMAN_BUILD_FLAGS="--pull"
 PODMAN_BUILD_FLAGS ?=
@@ -73,7 +79,8 @@ help:
 	@echo "  clean   Remove every tag this repo applies"
 	@echo
 	@echo "Pinned Teleport version: $(TELEPORT_VERSION)"
-	@echo "Bumping it means editing the Makefile, the Containerfile and README.md."
+	@echo "Bumping it means editing the Makefile, the two per-arch digests and"
+	@echo "TELEPORT_VERSION in the Containerfile, and README.md."
 
 build:
 	$(PODMAN) build -t $(LOCAL_IMAGE):latest \
@@ -98,7 +105,42 @@ tag:
 	for t in $$tags; do $(PODMAN) tag "$(LOCAL_IMAGE):latest" "$(LOCAL_IMAGE):$$t"; done; \
 	echo "Tagged $(LOCAL_IMAGE): $$tags"
 
+# Three checks beyond the offline smoke test, all against things the smoke
+# test itself cannot see (it runs inside the image; README.md and labels are
+# both outside it):
+#
+#   1. README.md names the pinned version somewhere in prose -- the one copy of
+#      the pin nothing else cross-checks (spec D4). A plain grep, not a version
+#      parse: the point is only to catch the version going unmentioned after a
+#      bump, not to validate README prose.
+#   2. org.opencontainers.image.licenses is exactly the LicenseRef- SPDX escape
+#      hatch this image is supposed to carry (D10).
+#   3. org.opencontainers.image.description contains the pinned version, i.e.
+#      the label actually interpolates TELEPORT_VERSION rather than a
+#      hand-typed string that could drift from it (D3).
 test: build
+	@grep -q '$(TELEPORT_VERSION)' README.md || { \
+	  echo "FAIL: README.md does not mention $(TELEPORT_VERSION); the version pin" >&2; \
+	  echo "      has three copies (Containerfile, Makefile, README.md) and this" >&2; \
+	  echo "      is the one nothing else cross-checks -- update README.md in the" >&2; \
+	  echo "      same commit as any version bump." >&2; \
+	  exit 1; \
+	}
+	@set -eu; \
+	expected="LicenseRef-Teleport-Community-Edition"; \
+	actual=$$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' $(LOCAL_IMAGE):latest); \
+	[ "$$actual" = "$$expected" ] || { \
+	  echo "FAIL: org.opencontainers.image.licenses label is '$$actual', expected '$$expected'" >&2; \
+	  exit 1; \
+	}
+	@set -eu; \
+	expected="Teleport $(TELEPORT_VERSION) Community Edition client (tsh) on Ubuntu 26.04"; \
+	actual=$$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.description"}}' $(LOCAL_IMAGE):latest); \
+	[ "$$actual" = "$$expected" ] || { \
+	  echo "FAIL: org.opencontainers.image.description label is '$$actual', expected '$$expected'" >&2; \
+	  echo "      (expected the pinned version $(TELEPORT_VERSION) interpolated into it)" >&2; \
+	  exit 1; \
+	}
 	$(PODMAN) run --rm -v ./test:/apps:ro,z \
 	  -e EXPECT_VERSION=$(TELEPORT_VERSION) \
 	  $(LOCAL_IMAGE):latest sh /apps/smoke.sh
