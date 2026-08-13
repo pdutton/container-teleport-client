@@ -36,9 +36,12 @@ done
 # (e) A licence obligation rather than a feature: section 4(a) of the Teleport
 # Community Edition License requires recipients to be given a copy, and this
 # image redistributes the binary (M5). A refactor of the COPY lines could drop
-# it with nothing a user does ever revealing the loss.
-[ -s /usr/share/doc/teleport/LICENSE-community ] \
-  || fail "/usr/share/doc/teleport/LICENSE-community is missing or empty"
+# it, or swap in the wrong file, with nothing a user does ever revealing the
+# loss -- non-empty alone is not enough, since `tsh` itself or this repo's own
+# AGPL LICENSE are also non-empty and would pass a size-only check. Grep for
+# text that only the Community Edition licence contains.
+grep -q "Teleport Community Edition License" /usr/share/doc/teleport/LICENSE-community \
+  || fail "/usr/share/doc/teleport/LICENSE-community is missing, empty, or does not contain the Teleport Community Edition License text"
 
 # (f) /root/.tsh is the mount point README tells people to bind their identity
 # to (D7), so assert the image actually presents it rather than assuming.
