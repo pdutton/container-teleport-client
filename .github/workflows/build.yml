@@ -20,6 +20,10 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-latest
+    # The build pulls a 217 MB tarball plus base images; a hung fetch on a
+    # runner would otherwise burn the default six-hour job timeout. 20 minutes
+    # is generous headroom over a normal run.
+    timeout-minutes: 20
 
     steps:
       # v7 runs on Node.js 24. v4 targets Node.js 20, which is deprecated, and
@@ -76,6 +80,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    # Just a checkout and a third-party action call; a hang here has no large
+    # transfer to justify a long wait.
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v7
