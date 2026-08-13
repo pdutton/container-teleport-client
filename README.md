@@ -16,18 +16,34 @@ this Section 2 exists." If your organization is over either threshold, you
 have no licence to use this image. A copy of the licence ships inside the
 image at `/usr/share/doc/teleport/LICENSE-community`.
 
+The condition is on whoever is *exercising* the licence, not on who happens to
+type the command: pulling and running this image for your own, personal
+purposes is you exercising it as an individual and is covered regardless of
+your employer's size, but using it for your employer's benefit makes your
+employer the exercising party, so your employer's employee count and revenue
+are what govern instead. (A reading of the licence text, not legal advice.)
+
 ## Log in and Connect
 
 ```bash
 mkdir -p ~/.tsh   # podman does not create a bind mount's source directory for you
 alias tsh='podman run -ti --rm -v "$HOME/.tsh":/root/.tsh docker.io/pdutton/teleport-client:latest tsh'
 
-tsh login --proxy=teleport.example.com claude
-tsh ssh claude@teleport-node
+tsh login --proxy=teleport.example.com:443 --user=claude   # "claude" here is your Teleport username
+tsh ls                                                      # list the nodes you can reach, and their names
+tsh ssh claude@teleport-node   # "claude" here is the OS login user on that node -- it can be a
+                                # different name from your Teleport username above; they're spelled
+                                # the same in this example only because it's convenient, not because
+                                # they must match
 ```
 
 `podman run -ti` is required, not cosmetic: `tsh login` needs a real terminal for the password
 and MFA prompts and will not accept a pipe.
+
+This alias is not a full drop-in for a locally installed `tsh`: only `~/.tsh` is mounted and
+`WORKDIR` is `/apps`, so subcommands that touch other host files (`tsh scp`, `tsh play` against a
+local recording, `--identity` outside `~/.tsh`) will fail, and `-ti` interferes with piping its
+output.
 
 `-v "$HOME/.tsh":/root/.tsh` bind-mounts your host's Teleport identity into the container. It is
 the *same* identity a `tsh` installed directly on the host would use — log in once, from either
@@ -40,7 +56,11 @@ create the source directory for you, so without it the run fails on the very fir
 `statfs ...: no such file or directory`. Harmless to repeat if `~/.tsh` already exists.
 
 Creating the cluster user and enrolling a second factor is a cluster-side step this repo does not
-cover; see `~/projects/teleport/primary/SETUP-CLIENT.md` for that.
+cover; see Teleport's own documentation on
+[adding local users](https://goteleport.com/docs/zero-trust-access/rbac-get-started/users/) (the
+invite link it generates walks a new user through setting a password and enrolling MFA) and the
+[`tsh mfa add`](https://goteleport.com/docs/reference/cli/tsh/) reference for adding further
+devices later.
 
 ## Tunnelling a Port
 
@@ -156,10 +176,12 @@ podman pull docker.io/pdutton/teleport-client@sha256:<digest>
 ```
 
 The Teleport version is pinned at **18.10.4**. This is the third of three places that pin appears
-in this repo (`Containerfile`, `Makefile`), and the *only* one of the three that nothing
-cross-checks — a version bump here is a manual edit, and this text can go stale if that edit is
-missed. See [Why the Version Is Pinned](#why-the-version-is-pinned-rather-than-resolved) below for
-why it is pinned rather than resolved, and `CLAUDE.md` for the mechanics of bumping it.
+in this repo (`Containerfile`, `Makefile`), and `make test` greps this file for the pinned version
+to catch a bump that missed it — a version bump here is still a manual edit, but a forgotten one
+now fails the build rather than silently going stale. See
+[Why the Version Is Pinned](#why-the-version-is-pinned-rather-than-resolved) below for why it is
+pinned rather than resolved, and `CLAUDE.md` for the mechanics of bumping it (which also means
+updating the two per-architecture digest pins in the Containerfile).
 
 ## Why the Version Is Pinned Rather Than Resolved
 
@@ -172,11 +194,23 @@ not appear in the GitHub releases list at all — a resolver built on that API w
 pinned an older release while believing itself current. Pinning by hand, and bumping deliberately,
 is more honest than an automatic resolver that can be wrong without telling you.
 
-The build verifies the download's integrity, not its authenticity. It fetches the tarball and a
-matching `.sha256` from `cdn.teleport.dev` and checks the hash — but that checksum is served by
-the *same host* as the tarball, so it proves the download was not corrupted or truncated in
-transit, not that Teleport authored the bytes. Teleport publishes no detached signature for these
-tarballs. TLS to `cdn.teleport.dev` is what actually carries the trust here.
+## Integrity, Not Authenticity
+
+The build fetches the tarball and a matching `.sha256` from `cdn.teleport.dev` and checks the
+hash — but that checksum is served by the *same host* as the tarball in the same breath, so on its
+own it proves only that the download was not corrupted or truncated in transit, not that Teleport
+authored the bytes. A tarball silently republished under the same version name would pass that
+check unnoticed on the next cache miss.
+
+The Containerfile also pins an expected SHA-256 digest per architecture (`TELEPORT_SHA256_AMD64`,
+`TELEPORT_SHA256_ARM64`), recorded by hand against bytes fetched from `cdn.teleport.dev` on a
+stated date, and fails the build loudly if the downloaded tarball's digest does not match. That
+closes the republication gap above — a rebuild always fetches and verifies the *same* bytes — but
+it is still not authenticity: the pin itself was taken from the same unsigned CDN download it now
+protects against future substitution, so it establishes a binding to bytes a human looked at on
+that date, not that Teleport authored them. Teleport publishes no detached signature for these
+tarballs at all. TLS to `cdn.teleport.dev`, at the time the pin was taken, is what actually carries
+whatever trust exists in the original bytes.
 
 ## Building Locally
 
