@@ -9,9 +9,9 @@ Requires Podman and GNU Make.
 
 ```bash
 make help    # lists every user-facing target and the pinned version
-make build   # builds localhost/teleport-client and applies the full tag set
-make test    # builds, then runs test/smoke.sh inside the built image
-make clean   # removes this repo's four tags
+make build   # builds both variants of localhost/teleport-client, applies the full tag set
+make test    # builds, then runs test/smoke.sh inside each built image
+make clean   # removes this repo's ten tags
 make push    # builds, tests, then publishes every tag (needs registry credentials)
 ```
 
@@ -20,22 +20,72 @@ invocable (`make tag`), not just an internal step `build` calls; the wording
 above says "every user-facing target" rather than "every target" for that
 reason.)
 
+## Variants
+
+Two images come off one `Containerfile`, separated by a single build arg,
+`INCLUDE_TCTL` (D12):
+
+| Variant | Contents | Base tag | Full tag set |
+|---|---|---|---|
+| `tsh` | `tsh` | `latest` | `latest` `tsh` `18` `18.10` `18.10.4` |
+| `admin` | `tsh` + `tctl` | `admin` | `admin` `tctl` `18-admin` `18.10-admin` `18.10.4-admin` |
+
+The arg is read only in the downloader stage, where it decides which members
+`tar` extracts. The final stage does a directory copy (`COPY /out/bin/`) so it
+stays ignorant of the variant — `LABEL` and `COPY` cannot branch on a build
+arg, and this is what avoids needing them to.
+
+Every per-variant value is a row in the variant block near the top of the
+Makefile, read from the recipes as `$(<SETTING>_$(VARIANT))`. Each plain target
+(`build`, `tag`, `test`, `push`) re-invokes make once per variant against the
+matching `-variant` target; those require `VARIANT` and refuse to run without
+it, since make would otherwise expand `$(BASE_TAG_)` to nothing and fail
+somewhere much less obvious.
+
+A third variant would need a row in each table, a branch in `TAG_SET_SH`, a
+name in `REQUIRE_VARIANT_SH`, and a line in each plain target — but no new
+recipe. The per-variant fan-out is written out literally rather than looped over
+a `VARIANTS` list so that `make -n` stays readable and a non-zero exit cannot be
+swallowed by a `for` loop in a recipe.
+
+The description label is the one thing the Containerfile cannot supply for both
+variants, because `LABEL` has no conditionals. The admin build overrides
+`org.opencontainers.image.description` from the command line, alongside the
+`created` and `revision` labels the Makefile already sets there. The tsh build
+deliberately does *not* override it: leaving it to the Containerfile's own
+`LABEL` is what keeps the D3 check comparing two independently written copies.
+
+## Testing
+
 `make test` is the entire test story. There is no lint step and no unit test
-suite. It runs three checks outside the image before the smoke test runs
-inside it: `README.md` mentions the pinned version (grep), the
-`org.opencontainers.image.licenses` label is exactly
-`LicenseRef-Teleport-Community-Edition`, and the
-`org.opencontainers.image.description` label contains the pinned version (i.e.
-actually interpolates it rather than being hand-typed) — all via `podman image
-inspect`. The smoke test itself runs entirely offline inside the built image —
-it asserts `tsh`'s path, version, and absence of
-`teleport`/`tctl`/`tbot`/`curl`/`wget`, that the CA store exists, that the
-licence file is present and contains text unique to the Teleport Community
-Edition License (not just that it's non-empty — `tsh` itself or this repo's own
-AGPL `LICENSE` would also pass a size-only check), and that `$HOME/.tsh` can be
-created and written. It cannot verify an actual login: that needs a real
-cluster, a password and a second factor, so end-to-end verification of `tsh
-login` and the port-forward tunnel is a manual step after any version bump.
+suite. It greps `README.md` for the pinned version once, then runs per variant:
+the `org.opencontainers.image.licenses` label is exactly
+`LicenseRef-Teleport-Community-Edition`, the
+`org.opencontainers.image.description` label matches that variant's expected
+string with the pinned version interpolated (i.e. not hand-typed) — both via
+`podman image inspect` — and then the smoke test inside the image.
+
+The smoke test runs entirely offline inside the built image. It asserts `tsh`'s
+path and version, the absence of `teleport`/`tbot`/`curl`/`wget`, that the CA
+store exists, that the licence file is present and contains text unique to the
+Teleport Community Edition License (not just that it's non-empty — `tsh` itself
+or this repo's own AGPL `LICENSE` would also pass a size-only check), and that
+`$HOME/.tsh` can be created and written.
+
+`tctl` is asserted in **both** directions, driven by `EXPECT_TCTL`: present and
+reporting the pinned version in the admin variant, absent in the default one.
+Both halves matter. An accidental inclusion is 111 MB and an admin tool in the
+image people get without asking; an accidental omission leaves the `admin` tag
+published and useless, which nothing else would catch — every other assertion
+still passes on a tsh-only image. `EXPECT_TCTL` is validated against exactly
+`yes`/`no` for the same reason `INCLUDE_TCTL` is validated against exactly
+`true`/`false`: a typo that fell through to the negative branch would turn the
+admin variant's reason for existing into an assertion that passes.
+
+It cannot verify an actual login, or that `tctl` administers anything: those
+need a real cluster, a password, a second factor, and a privileged role. So
+end-to-end verification of `tsh login`, the port-forward tunnel, and any real
+`tctl` command is a manual step after any version bump.
 
 ## Publishing
 
@@ -45,16 +95,19 @@ goes through `LOCAL_IMAGE` (`localhost/$(IMAGE)`) — no bare `$(IMAGE)` may be
 reintroduced as an image reference, because a bare short name can resolve to a
 non-localhost repo and the push source must not depend on that tie-break.
 
-The four-tag scheme — `latest`, `18`, `18.10`, `18.10.4` — lives in `TAG_SET_SH`
-in the Makefile and is expanded by both `tag` and `push`, so it is defined once.
-Tags are derived by reading `tsh version` back out of the freshly built image,
-not typed by hand, so they cannot drift from what is actually installed.
+The ten-tag scheme lives in `TAG_SET_SH` in the Makefile, which switches on
+`$(VARIANT)` and is expanded by both `tag-variant` and `push-variant`, so it is
+defined once. Tags are derived by reading `tsh version` back out of the freshly
+built image, not typed by hand, so they cannot drift from what is actually
+installed. `tsh` is what gets read, not `tctl`, because it is the one binary
+both variants carry.
 
-There is no `ubuntu` tag. With a single image (one `Containerfile`, one base OS)
-it would be a permanent alias of `latest` — a second name meaning exactly the
-same thing, kept in sync for no benefit. `container-ansible` publishes an
-`ubuntu` tag because it also publishes `alpine`; that contrast is what gives the
-name meaning there, and it doesn't exist here (D9).
+`tsh` and `tctl` are aliases of `latest` and `admin`. That is not the same
+mistake as an `ubuntu` tag would be: a tag earns its keep when a sibling name
+gives it contrast, and `tsh` reads as a choice only because `tctl` sits beside
+it. `container-ansible`'s `ubuntu` tag works for exactly that reason — it also
+publishes `alpine`. There is still no `ubuntu` tag *here*, because this repo
+still has one base OS and nothing to contrast it with (D9, D12).
 
 ## How the version is pinned
 
@@ -123,8 +176,11 @@ This repo's own code — `Containerfile`, `Makefile`, `test/smoke.sh`, docs — 
 GPL-3.0-or-later `container-ansible`/`container-terraform` siblings, to align
 with the licence on Teleport's own source repository.
 
-The `tsh` binary the image *ships* is under the **Teleport Community Edition
-License**, which is neither AGPL nor stock Apache-2.0 — do not conflate the two.
+The Teleport binaries the images *ship* — `tsh`, plus `tctl` in the admin
+variant — are under the **Teleport Community Edition License**, which is neither
+AGPL nor stock Apache-2.0 — do not conflate the two. Both come out of the same
+tarball under the same licence, so the admin variant raises no licensing
+question the default does not.
 SPDX has no identifier for it, so the image label reads:
 
 ```

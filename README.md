@@ -3,6 +3,10 @@
 A container image carrying Teleport Community Edition's `tsh` client, so you can log in to a
 Teleport cluster and `ssh` through it without installing anything on the host.
 
+Two variants are published from the same build. The default carries `tsh` alone; the `admin`
+variant adds `tctl` for cluster administration. See
+[Published Images and Tags](#published-images-and-tags) for which tag gets you which.
+
 [![build](https://github.com/pdutton/container-teleport-client/actions/workflows/build.yml/badge.svg)](https://github.com/pdutton/container-teleport-client/actions/workflows/build.yml)
 
 ## Licensing and Eligibility
@@ -14,7 +18,7 @@ annual revenue. Section 2 of that licence makes this an express condition:
 "If the conditions of this License are not met, no grant of license under
 this Section 2 exists." If your organization is over either threshold, you
 have no licence to use this image. A copy of the licence ships inside the
-image at `/usr/share/doc/teleport/LICENSE-community`.
+image at `/usr/share/doc/teleport/LICENSE-community`, in both variants.
 
 The condition is on whoever is *exercising* the licence, not on who happens to
 type the command: pulling and running this image for your own, personal
@@ -105,6 +109,31 @@ named twice, in two different syntaxes (`podman run -p` and `tsh ssh -L`), and t
 not just from the host — the `-p 127.0.0.1:...` mapping is what keeps it off the host's other
 interfaces.
 
+## Administering the Cluster
+
+`tctl` is not in the default image. Pull the `admin` tag instead:
+
+```bash
+mkdir -p ~/.tsh
+alias tctl='podman run -ti --rm -v "$HOME/.tsh":/root/.tsh:z docker.io/pdutton/teleport-client:admin tctl'
+
+tsh login --proxy=teleport.example.com:443 --user=claude   # the tsh alias above still applies
+tctl users ls
+```
+
+`tctl` reads the same `~/.tsh` identity `tsh login` writes, so the mount, the `:z`, and the
+`mkdir -p` are all the same as for `tsh` — log in once and both work. Your Teleport user needs a
+role carrying the permissions for whatever you ask `tctl` to do; being able to log in is not by
+itself enough. See Teleport's [`tctl` reference](https://goteleport.com/docs/reference/cli/tctl/).
+
+The `admin` image is a superset: it carries `tsh` too, so one image can do both jobs if you would
+rather not pull two. The default stays `tsh`-only because `tctl` is 111 MB (368 MB against 257 MB)
+that most users logging in and tunnelling a port never invoke.
+
+Neither the smoke test nor CI can verify `tctl` actually administers anything — that needs a live
+cluster and a privileged role — so the automated check goes only as far as `tctl version`. Treat a
+real `tctl` command against your cluster as the manual verification step, the same as `tsh login`.
+
 ## Persisting the Identity
 
 The documented default is the bind mount shown above:
@@ -136,22 +165,27 @@ Running as root, with rootless podman doing the UID mapping, avoids that failure
 
 ## Image Contents
 
-| Path | Present |
-|---|---|
-| `/usr/local/bin/tsh` | yes — 134 MB |
-| `/usr/share/doc/teleport/LICENSE-community` | yes |
-| `ca-certificates` (`/etc/ssl/certs/ca-certificates.crt`) | yes |
-| `teleport` (the server) | no — would add 373 MB |
-| `tctl` (cluster admin) | no — would add 111 MB |
-| `tbot` (machine identity) | no |
-| `curl`, `wget` | no — the download happens in a build stage that is discarded |
-| `openssh-client` (`ssh`, `scp`) | no — `tsh ssh` speaks the protocol itself |
+| Path | Default (`latest`) | Admin (`admin`) |
+|---|---|---|
+| `/usr/local/bin/tsh` | yes — 134 MB | yes — 134 MB |
+| `/usr/local/bin/tctl` (cluster admin) | no | yes — 111 MB |
+| `/usr/share/doc/teleport/LICENSE-community` | yes | yes |
+| `ca-certificates` (`/etc/ssl/certs/ca-certificates.crt`) | yes | yes |
+| `teleport` (the server) | no — would add 373 MB | no |
+| `tbot` (machine identity) | no | no |
+| `curl`, `wget` | no — the download happens in a build stage that is discarded | no |
+| `openssh-client` (`ssh`, `scp`) | no — `tsh ssh` speaks the protocol itself | no |
+| **Total** | **257 MB** | **368 MB** |
 
-The image is built for the two goals above: logging in and tunnelling a port. Cluster
-administration (`tctl`) is out of scope for this image — reach the auth server directly (SSH
-access to the host it runs on, or Teleport's own
-[`tctl` reference](https://goteleport.com/docs/reference/cli/tctl/)) instead, and the server
-binary has no place in a client image at all.
+The default image is built for the two goals above: logging in and tunnelling a port. `tctl` moves
+to its own tag rather than into every image because those two goals do not need it, and the
+[`admin` variant](#administering-the-cluster) exists for when you do. The server binary has no
+place in a client image at all, in either variant.
+
+Both are asserted in both directions by the smoke test: the default image fails its build if `tctl`
+appears, and the admin image fails if it does not. An accidental inclusion would otherwise be an
+unannounced 111 MB nobody asked for, and an accidental omission would leave the `admin` tag
+published and useless.
 
 If you want `ssh`, `scp`, or `tsh proxy ssh` as an OpenSSH `ProxyCommand`, add `openssh-client` in
 a derived image:
@@ -172,16 +206,30 @@ Docker Hub:
 podman pull docker.io/pdutton/teleport-client:latest
 ```
 
-| Tag | Resolves to |
-|---|---|
-| `latest` | the current build |
-| `18` | the newest build on the Teleport 18 line published here |
-| `18.10` | the newest build on the Teleport 18.10 line published here |
-| `18.10.4` | this exact version |
+| Tag | Contents | Resolves to |
+|---|---|---|
+| `latest` | `tsh` | the current build |
+| `tsh` | `tsh` | the current build — a named alias of `latest` |
+| `18` | `tsh` | the newest build on the Teleport 18 line published here |
+| `18.10` | `tsh` | the newest build on the Teleport 18.10 line published here |
+| `18.10.4` | `tsh` | this exact version |
+| `admin` | `tsh` + `tctl` | the current build |
+| `tctl` | `tsh` + `tctl` | the current build — a named alias of `admin` |
+| `18-admin` | `tsh` + `tctl` | the newest build on the Teleport 18 line published here |
+| `18.10-admin` | `tsh` + `tctl` | the newest build on the Teleport 18.10 line published here |
+| `18.10.4-admin` | `tsh` + `tctl` | this exact version |
 
-All four are derived by reading `tsh version` back out of the freshly built image, so they cannot
-drift from what is actually installed inside it. There is no `ubuntu` tag — with a single base
-image it would be a permanent alias of `latest`, a second name for the same thing.
+All ten are derived by reading `tsh version` back out of the freshly built image, so they cannot
+drift from what is actually installed inside it. `tsh` is read rather than `tctl` because it is
+the one binary both variants carry.
+
+`latest` and the bare version tags point at the `tsh`-only image, so nobody gets `tctl` — or its
+111 MB — without asking for it by name.
+
+`tsh` and `tctl` are aliases of `latest` and `admin`, and are there so the two variants can be
+named symmetrically: `:tsh` and `:tctl` say which tool you want, without either one being the
+odd one out. There is still no `ubuntu` tag — with a single base OS it would be a permanent alias
+that no second name gives meaning to.
 
 **Every tag is mutable, version tags included.** A rebuild of 18.10.4 re-pushes the same name over
 a new digest (a base-image security refresh, for instance). If you need a reproducible reference,
@@ -233,22 +281,28 @@ whatever trust exists in the original bytes.
 Requires [Podman](https://podman.io/) and GNU Make.
 
 ```bash
-make build      # build the image and apply the full tag set
-make test       # build, then run the offline smoke test
-make clean      # remove this repo's four tags
+make build      # build both variants and apply the full tag set
+make test       # build, then run the offline smoke test against each variant
+make clean      # remove this repo's ten tags
 make push       # build, test, then publish every tag (needs registry credentials)
 
 make build PODMAN_BUILD_FLAGS="--pull"   # refresh the Ubuntu and Alpine base images
+make build-variant VARIANT=admin         # just the one variant
 ```
+
+Each plain target does both variants, one after the other, by re-invoking itself with
+`VARIANT=tsh` and then `VARIANT=admin`. Add `VARIANT=` to the matching `-variant` target
+(`build-variant`, `tag-variant`, `test-variant`, `push-variant`) to work on one alone — useful
+when iterating, since a full `make build` downloads the 217 MB Teleport tarball twice.
 
 `push` depends on `test`, so a failing smoke test blocks the publish — a broken image cannot reach
 the registry through `make push`. Publishing needs `podman login docker.io` first, or the push
 fails on its first tag.
 
-`make clean` removes this repo's four tags but leaves the untagged `<none>` layer that the
-version-label build step creates behind — `podman rmi` on a tag does not cascade to the image it
-was derived from. Clear those with `podman image prune`; `clean` does not run it automatically,
-since a blanket prune would also delete images this repo never built.
+`make clean` removes this repo's ten tags but leaves behind the untagged `<none>` layers that the
+version-label build step creates (one per variant) — `podman rmi` on a tag does not cascade to the
+image it was derived from. Clear those with `podman image prune`; `clean` does not run it
+automatically, since a blanket prune would also delete images this repo never built.
 
 ## Continuous Integration
 
@@ -271,9 +325,11 @@ who has landed on the image without ever seeing this repo.
 **This repo's own code** — `Containerfile`, `Makefile`, `test/smoke.sh`, and the documentation —
 is licensed under **AGPL-3.0-only**. The `LICENSE` file holds that text.
 
-**The `tsh` binary this image ships** is under the **Teleport Community Edition License**, an
-Apache-2.0 derivative that is neither AGPL nor stock Apache-2.0 — do not conflate the two. SPDX has
-no identifier for it, so the image carries:
+**The Teleport binaries these images ship** — `tsh`, and `tctl` in the `admin` variant — are under
+the **Teleport Community Edition License**, an Apache-2.0 derivative that is neither AGPL nor stock
+Apache-2.0 — do not conflate the two. Both come out of the same tarball under the same licence, so
+the `admin` variant adds no licensing question the default one does not already raise. SPDX has no
+identifier for it, so both images carry:
 
 ```
 org.opencontainers.image.licenses="LicenseRef-Teleport-Community-Edition"
