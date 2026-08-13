@@ -2,8 +2,18 @@
 set -eu
 
 : "${EXPECT_VERSION:?EXPECT_VERSION must be set}"
+: "${EXPECT_TCTL:?EXPECT_TCTL must be set to yes or no}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Checked here rather than trusted, and against the two exact strings: an
+# unrecognised value must not fall through to the `no` branch, which would turn
+# the admin variant's whole reason for existing into an assertion that tctl is
+# absent -- and pass.
+case "$EXPECT_TCTL" in
+  yes|no) ;;
+  *) fail "EXPECT_TCTL is '$EXPECT_TCTL', expected exactly 'yes' or 'no'" ;;
+esac
 
 # (a) The binary must be at /usr/local/bin/tsh specifically. That path is the
 # contract for anyone building FROM this image or COPY --from-ing out of it, so
@@ -21,12 +31,33 @@ echo "tsh version: $version"
 [ "$version" = "$EXPECT_VERSION" ] \
   || fail "tsh is $version, expected $EXPECT_VERSION"
 
-# (c) The exclusions are contract, not accident (D5). teleport/tctl/tbot were
+# (c) The exclusions are contract, not accident (D5). teleport and tbot were
 # never copied in; curl and wget are absent because the download happens in a
-# stage that is discarded (D2), and the Ubuntu base ships neither (M1).
-for b in teleport tctl tbot curl wget; do
+# stage that is discarded (D2), and the Ubuntu base ships neither (M1). tctl is
+# handled separately below, since which side of this list it belongs on is the
+# one thing that differs between the two variants.
+for b in teleport tbot curl wget; do
   ! command -v "$b" >/dev/null 2>&1 || fail "$b is present; it must not be"
 done
+
+# (c2) tctl, asserted in both directions (D12). The admin variant exists only to
+# carry it, so its absence there is a silent product defect; the default variant
+# is the smaller image people get without asking, so its presence there is an
+# unannounced ~100 MB and an admin tool nobody requested. Version is checked too:
+# tsh and tctl come out of the same tarball and disagreeing would mean the
+# extraction pulled members from somewhere unexpected.
+if [ "$EXPECT_TCTL" = yes ]; then
+  { [ -f /usr/local/bin/tctl ] && [ -x /usr/local/bin/tctl ]; } \
+    || fail "/usr/local/bin/tctl is missing or not executable, but EXPECT_TCTL=yes"
+  tctl_version="$(tctl version | awk 'NR==1{print $2}')"
+  tctl_version="${tctl_version#v}"
+  echo "tctl version: $tctl_version"
+  [ "$tctl_version" = "$EXPECT_VERSION" ] \
+    || fail "tctl is $tctl_version, expected $EXPECT_VERSION"
+else
+  ! command -v tctl >/dev/null 2>&1 \
+    || fail "tctl is present, but EXPECT_TCTL=no; this variant must ship tsh alone"
+fi
 
 # (d) tsh carries no trust store of its own and the Ubuntu base ships none, so
 # without this package tsh cannot validate the proxy certificate (M1).
@@ -50,4 +81,4 @@ mkdir -p "$HOME/.tsh" || fail "$HOME/.tsh could not be created"
 : > "$HOME/.tsh/.smoke-probe" || fail "$HOME/.tsh is not writable"
 rm -f "$HOME/.tsh/.smoke-probe"
 
-echo "PASS: teleport-client $version smoke test ok"
+echo "PASS: teleport-client $version smoke test ok (tctl expected: $EXPECT_TCTL)"

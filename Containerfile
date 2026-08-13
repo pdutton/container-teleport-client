@@ -1,7 +1,9 @@
 # Declared once, before any FROM, so it is global and both stages take it into
 # scope with a bare `ARG TELEPORT_VERSION`: the downloader builds the URL from
 # it and the final stage's description label interpolates it, so the published
-# label cannot advertise a version the image is not on.
+# label cannot advertise a version the image is not on. The admin variant
+# overrides that label from the command line instead (see below), so for that
+# one image the same guarantee comes from `make test` rather than from here.
 ARG TELEPORT_VERSION=18.10.4
 
 # ---- stage 1: download and verify -------------------------------------------
@@ -24,9 +26,25 @@ ARG TELEPORT_VERSION
 ARG TELEPORT_SHA256_AMD64=a94eeaeec21757fc0973b677d96a683d9cf0f534960c2a835504fe64713145bb
 ARG TELEPORT_SHA256_ARM64=915baa902be017b4db930ab17cfe61f4821bd1eb531cf9a04b7df18734a0d1e8
 
+# The whole of the tsh/admin variant difference. Both images come off this one
+# Containerfile; only the archive members extracted below change (D12). Default
+# false, so an unparameterised `podman build .` still produces the tsh-only
+# image the default tags point at.
+ARG INCLUDE_TCTL=false
+
 RUN apk add --no-cache curl
 
 RUN set -eu; \
+# Validated before anything is downloaded, and against the two exact strings
+# rather than a truthiness test. A typo'd `TRUE` or `yes` must not fall through
+# to the false branch: that would build a tsh-only image which the Makefile
+# would then tag and publish as `admin` -- broken in a way nothing downstream
+# could notice, since every other assertion about the image would still pass.
+    case "${INCLUDE_TCTL}" in \
+      true)  tctl_member=teleport/tctl ;; \
+      false) tctl_member= ;; \
+      *) echo "ERROR: INCLUDE_TCTL must be exactly 'true' or 'false', not '${INCLUDE_TCTL}'" >&2; exit 1 ;; \
+    esac; \
     case "$(uname -m)" in \
       x86_64)  arch=amd64 ; arch_arg=TELEPORT_SHA256_AMD64 ; expected="${TELEPORT_SHA256_AMD64}" ;; \
       aarch64) arch=arm64 ; arch_arg=TELEPORT_SHA256_ARM64 ; expected="${TELEPORT_SHA256_ARM64}" ;; \
@@ -59,18 +77,34 @@ RUN set -eu; \
       echo "the pin without confirming which one happened." >&2; \
       exit 1; \
     fi; \
-# Two members out of a 217 MB archive: the client, and the licence that section
-# 4(a) requires to travel with any redistribution of it (M5). Extract-then-move
-# rather than --strip-components, which busybox tar does not reliably support.
-    tar -xzf "${tarball}" -C /tmp teleport/tsh teleport/LICENSE-community; \
-    mkdir /out; \
-    mv /tmp/teleport/tsh /tmp/teleport/LICENSE-community /out/
+# Two or three members out of a 217 MB archive: the client, the admin tool when
+# INCLUDE_TCTL asked for it, and the licence that section 4(a) requires to
+# travel with any redistribution of either (M5). Extract-then-move rather than
+# --strip-components, which busybox tar does not reliably support.
+#
+# ${tctl_member} is deliberately unquoted -- it must vanish entirely, not expand
+# to an empty argument tar would reject. It is always *set* (both branches of the
+# case above assign it), so `set -u` is satisfied.
+    tar -xzf "${tarball}" -C /tmp teleport/tsh teleport/LICENSE-community ${tctl_member}; \
+# The binaries land in their own directory so the final stage can copy them as a
+# directory and stay ignorant of the variant: `COPY /out/bin/` moves one file or
+# two without a second COPY line that would have to be conditional -- which
+# Dockerfile syntax cannot express.
+    mkdir -p /out/bin; \
+    mv /tmp/teleport/LICENSE-community /out/; \
+    mv /tmp/teleport/tsh /out/bin/; \
+    if [ -n "${tctl_member}" ]; then mv /tmp/teleport/tctl /out/bin/; fi
 
 # ---- stage 2: the image -----------------------------------------------------
 FROM docker.io/library/ubuntu:26.04
 
 ARG TELEPORT_VERSION
 
+# The description names the tsh-only variant, because `LABEL` cannot branch on a
+# build arg -- Dockerfile syntax has no conditionals. The admin build therefore
+# overrides this one label from the `podman build` command line, alongside the
+# `created` and `revision` labels the Makefile already sets there. `make test`
+# asserts the resulting value for both variants.
 LABEL org.opencontainers.image.title="teleport-client" \
       org.opencontainers.image.description="Teleport ${TELEPORT_VERSION} Community Edition client (tsh) on Ubuntu 26.04" \
       org.opencontainers.image.licenses="LicenseRef-Teleport-Community-Edition" \
@@ -86,7 +120,9 @@ RUN apt-get update \
       ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=downloader /out/tsh /usr/local/bin/tsh
+# A directory copy, not a per-binary one: /out/bin holds tsh alone, or tsh and
+# tctl, depending on INCLUDE_TCTL, and this line does not need to know which.
+COPY --from=downloader /out/bin/ /usr/local/bin/
 COPY --from=downloader /out/LICENSE-community /usr/share/doc/teleport/LICENSE-community
 
 WORKDIR /apps

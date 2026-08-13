@@ -20,10 +20,13 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-latest
-    # The build pulls a 217 MB tarball plus base images; a hung fetch on a
-    # runner would otherwise burn the default six-hour job timeout. 20 minutes
-    # is generous headroom over a normal run.
-    timeout-minutes: 20
+    # Two variants, so the 217 MB tarball is pulled twice: the variants differ
+    # in the download-and-extract layer, which is where podman's cache would
+    # otherwise spare the second fetch, and only the base images and the
+    # ca-certificates layer are shared. A hung fetch would otherwise burn the
+    # default six-hour job timeout. 30 minutes is generous headroom over a
+    # normal two-variant run.
+    timeout-minutes: 30
 
     steps:
       # v7 runs on Node.js 24. v4 targets Node.js 20, which is deprecated, and
@@ -118,4 +121,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: pdutton/teleport-client
           readme-filepath: ./DOCKERHUB-OVERVIEW.md
-          short-description: "Teleport Community Edition client (tsh), ready to run without installing it"
+          # Docker Hub caps this at 100 characters and truncates silently past
+          # it, so this stays well short rather than spending the budget on
+          # "without installing it" -- which the overview body says anyway.
+          short-description: "Teleport Community Edition tsh client, ready to run; tctl on the admin tag"

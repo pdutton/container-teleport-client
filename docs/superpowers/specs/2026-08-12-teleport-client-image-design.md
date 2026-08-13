@@ -217,6 +217,15 @@ If a second variant ever becomes real, reintroducing the axis is a mechanical
 change against a working repo, and it can be done *then* with a real sibling to
 test the generalization against.
 
+**That happened on 2026-08-13 (D12), and the deferral paid off.** With a real
+second variant to test against, the axis that came back is narrower than the one
+this section declined to build up front: a `VARIANT` variable with a per-variant
+settings table and recursive make, still a single `Containerfile` with no
+extension, still plain targets and no `%`-pattern rules, and still no CI matrix.
+The heading stands with one correction — one `Containerfile`, Ubuntu only, but
+now **two images**. The "no second OS" and "no channel" halves are untouched;
+what varies is which archive members get extracted.
+
 ### D2. Two-stage build; the final image has no download tool
 
 Stage 1 is `alpine:3.23` with `curl`. It resolves the architecture, downloads the
@@ -314,6 +323,10 @@ Excluded, each for a reason:
   drive a remote cluster using a `tsh` profile, so this is a real trade, but the
   goals are login, ssh and a tunnel; cluster administration goes through
   `SETUP-CLIENT.md`'s `make ssh` path to the auth server.
+  **Superseded by D12 (2026-08-13):** the size argument held, but "excluded
+  everywhere" was the wrong conclusion to draw from it. `tctl` now ships in a
+  separate `admin` variant. This paragraph's reasoning survives intact as the
+  reason the *default* image is still `tsh`-only.
 - **`teleport`** (the server) — 373 MB, and `SETUP-CLIENT.md`'s verification step
   explicitly asserts `which teleport` finds nothing on a client.
 - **`tbot`**, **`teleport-update`** — machine identity and self-update, neither
@@ -443,6 +456,9 @@ image so they cannot drift from what is installed:
 
 `latest` · `18` · `18.10` · `18.10.4`
 
+**Extended by D12 (2026-08-13):** ten tags now, across two variants. The
+readback mechanism is unchanged, and these four still name the `tsh`-only image.
+
 There is no `ubuntu` tag. With a single image it would be a permanent alias of
 `latest` — a second name meaning exactly the same thing, to be kept in sync for
 no benefit. The base OS is a README fact. (`container-ansible` publishes an
@@ -462,7 +478,10 @@ same name over a new digest. Pin by digest for reproducibility.
   asserted directly rather than inferred from `tsh` being on `PATH`
 - `tsh version` reports exactly `EXPECT_VERSION`
 - `teleport`, `tctl`, `tbot`, `curl` and `wget` are all absent from `PATH` (D2,
-  D5 — the exclusions are contract, not accident)
+  D5 — the exclusions are contract, not accident). **Amended by D12:** `tctl`
+  moved out of this list and is now asserted in both directions, driven by
+  `EXPECT_TCTL` — absent in the default variant, present and reporting the
+  pinned version in the `admin` one.
 - `/etc/ssl/certs/ca-certificates.crt` exists (M1)
 - `/usr/share/doc/teleport/LICENSE-community` exists and contains text unique to
   that licence (`grep -q "Teleport Community Edition License"`), not merely
@@ -561,7 +580,8 @@ The Makefile keeps the sibling conventions that are not variant machinery:
 `LOCAL_IMAGE = localhost/$(IMAGE)` used for every local reference (a bare short
 name can resolve to a non-localhost repo, and the push source must not depend on
 that tie-break); `TAG_SET_SH` expanded by both `tag` and `push` so the tag scheme
-is written once; the version-readback tagging pass; `push` depending on `test` so
+is written once (by `tag-variant` and `push-variant` since D12, switching on
+`$(VARIANT)` — still one definition); the version-readback tagging pass; `push` depending on `test` so
 a failing smoke test blocks the publish; and a `clean` scoped to this repo's own
 tags.
 
@@ -572,6 +592,79 @@ separate `dockerhub-description` job — `needs: build`, master-only, pinned to 
 commit SHA because it is a third-party action handling a write-scoped token —
 that syncs `DOCKERHUB-OVERVIEW.md` to the Hub page.
 
+### D12. `tctl` ships in a second variant, gated on one build arg
+
+**Added 2026-08-13, after the v1.0.0 release.** This reverses part of D5 and
+extends D9; both are annotated below rather than rewritten, so the original
+reasoning and what overtook it stay legible.
+
+`tctl` is now available, but not in the default image. One `Containerfile`
+produces two images, separated by a single build arg:
+
+| Variant | Contents | Size | Tags |
+|---|---|---|---|
+| `tsh` (default) | `tsh` | 257 MB | `latest` `tsh` `18` `18.10` `18.10.4` |
+| `admin` | `tsh` + `tctl` | 368 MB | `admin` `tctl` `18-admin` `18.10-admin` `18.10.4-admin` |
+
+**Why not a second `Containerfile`.** The whole difference is which members
+`tar` extracts. A second file would duplicate the digest pin, the architecture
+`case`, the licence copy and the base-image setup — every one of which is
+load-bearing, and every one of which would then have to be bumped twice. The
+`INCLUDE_TCTL` arg is read only in the downloader stage; the final stage does a
+directory copy (`COPY --from=downloader /out/bin/`) and never learns which
+variant it is building. That single indirection is what lets `COPY` stay
+unconditional, which matters because Dockerfile syntax has no conditionals at
+all.
+
+**Why the default stays `tsh`-only.** 111 MB, for a tool that neither of the two
+goals in this document needs. Reversing the default would push that cost onto
+every user who only wants to log in and hold a tunnel open — the majority — to
+spare a pull for the minority who administer the cluster. The `admin` variant is
+a superset rather than a `tctl`-only image, so nobody who wants both has to pull
+twice.
+
+**Why the arg is validated against exact strings.** `INCLUDE_TCTL` accepts only
+`true` or `false`, and fails the build before the download otherwise. A truthiness
+test would let `TRUE` or `yes` fall through to the false branch and build a
+`tsh`-only image that the Makefile would then tag and publish as `admin`. Nothing
+downstream could catch it: every other assertion about that image still passes.
+`EXPECT_TCTL` in the smoke test is validated the same way, for the same reason —
+a value that fell through to `no` would turn the admin variant's reason for
+existing into an assertion that succeeds.
+
+**Why the smoke test asserts `tctl` in both directions.** Presence in the admin
+variant and absence in the default one are each the only check that would catch
+their own failure. An accidental inclusion is an unannounced 111 MB and an admin
+tool in the image people get without asking; an accidental omission leaves the
+`admin` tag published and useless.
+
+**What is *not* verified.** `tctl version` runs offline, so that is all CI can
+assert. Whether `tctl` can actually administer a cluster needs a live auth
+server and a privileged role, and stays a manual step alongside `tsh login` and
+the tunnel (D9's closing note already says this about the client).
+
+**The `tsh` and `tctl` tags are aliases**, of `latest` and `admin` respectively.
+D9 rejects an `ubuntu` tag as a permanent alias earning nothing, and that
+argument still holds for `ubuntu` — but it turns on contrast, not on aliasing as
+such. `container-ansible`'s `ubuntu` tag earns its keep because `alpine` sits
+beside it. `tsh` earns its keep the same way, because `tctl` now does. There is
+still no `ubuntu` tag here, because there is still one base OS.
+
+**Makefile shape.** Per-variant values are rows in a table near the top, read
+from the recipes as `$(<SETTING>_$(VARIANT))`; each plain target re-invokes make
+once per variant against a `-variant` target that refuses to run with `VARIANT`
+unset. Adding a third variant means adding rows, not recipes.
+
+The one thing that could not be single-sourced is
+`org.opencontainers.image.description`: `LABEL` cannot branch on a build arg, so
+the admin build overrides it from the command line. The `tsh` build deliberately
+does not, which is what keeps D4's cross-check comparing two independently
+written copies rather than one string against itself.
+
+**CI cost.** The tarball is fetched twice — the variants diverge at exactly the
+layer podman's cache would otherwise reuse — so the build job's `timeout-minutes`
+went from 20 to 30.
+
 ---
 
 ## Out of scope
@@ -580,7 +673,9 @@ that syncs `DOCKERHUB-OVERVIEW.md` to the Hub page.
 - **No multi-arch manifest.** The build maps `uname -m` to the right download, so
   it is correct on whatever host runs it, but only a single-arch image is
   published. Listed under "Planned" in the README, as in the siblings.
-- **No `tctl`, no server binary, no VNC client** (D5, D8).
+- **No server binary, no VNC client** (D5, D8). `tctl` was on this list until
+  D12 moved it into the `admin` variant; the server binary and VNC client stay
+  out of both.
 - **No scheduled rebuild.** A Teleport patch release or an Ubuntu base fix
   reaches the published image only when someone bumps the pin or re-runs the
   workflow.

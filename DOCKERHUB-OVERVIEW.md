@@ -1,7 +1,8 @@
 # pdutton/teleport-client
 
 Teleport Community Edition's `tsh` client, ready to run without installing it — log in to a
-Teleport cluster and `ssh` through it from a container.
+Teleport cluster and `ssh` through it from a container. The `admin` tag adds `tctl` for cluster
+administration.
 
 **Teleport Community Edition is not licensed to everyone.** The Teleport
 Community Edition License grants its rights only to an individual, or to an
@@ -10,7 +11,7 @@ annual revenue. Section 2 of that licence makes this an express condition:
 "If the conditions of this License are not met, no grant of license under
 this Section 2 exists." If your organization is over either threshold, you
 have no licence to use this image. A copy of the licence ships inside the
-image at `/usr/share/doc/teleport/LICENSE-community`.
+image at `/usr/share/doc/teleport/LICENSE-community`, in both variants.
 
 The condition is on whoever is *exercising* the licence, not on who happens to
 type the command: pulling and running this image for your own, personal
@@ -54,18 +55,41 @@ default `127.0.0.1` bind is the host loopback, so a viewer on the host connects 
 `localhost:5901` directly. See the [repo README](https://github.com/pdutton/container-teleport-client)
 for the isolated-network alternative.
 
+## Administering the Cluster
+
+`tctl` is not in the default image — pull the `admin` tag instead:
+
+```bash
+alias tctl='podman run -ti --rm -v "$HOME/.tsh":/root/.tsh:z docker.io/pdutton/teleport-client:admin tctl'
+tctl users ls
+```
+
+It reads the same `~/.tsh` identity `tsh login` writes, so log in once and both work. Your Teleport
+user needs a role carrying the permissions for what you ask `tctl` to do. The `admin` image carries
+`tsh` as well, so it can do both jobs; the default stays `tsh`-only because `tctl` is 111 MB
+(368 MB against 257 MB) that most users never invoke.
+
 ## Tags
 
-| Tag | Resolves to |
-|---|---|
-| `latest` | the current build |
-| `18` | the newest build on the Teleport 18 line published here |
-| `18.10` | the newest build on the Teleport 18.10 line published here |
-| `18.10.4` | this exact version |
+Two variants: the default carries `tsh` alone, the `admin` variant adds `tctl`. `latest` and the
+bare version tags point at the `tsh`-only image, so `tctl` never arrives unasked.
+
+| Tag | Contents | Resolves to |
+|---|---|---|
+| `latest` | `tsh` | the current build |
+| `tsh` | `tsh` | the current build — a named alias of `latest` |
+| `18` | `tsh` | the newest build on the Teleport 18 line published here |
+| `18.10` | `tsh` | the newest build on the Teleport 18.10 line published here |
+| `18.10.4` | `tsh` | this exact version |
+| `admin` | `tsh` + `tctl` | the current build |
+| `tctl` | `tsh` + `tctl` | the current build — a named alias of `admin` |
+| `18-admin` | `tsh` + `tctl` | the newest build on the Teleport 18 line published here |
+| `18.10-admin` | `tsh` + `tctl` | the newest build on the Teleport 18.10 line published here |
+| `18.10.4-admin` | `tsh` + `tctl` | this exact version |
 
 ## Integrity, Not Authenticity
 
-The build pins a per-architecture SHA-256 digest for the `tsh` tarball it downloads, which stops a
+The build pins a per-architecture SHA-256 digest for the Teleport tarball it downloads, which stops a
 tarball silently republished under the same version name — but Teleport publishes no detached
 signature for these tarballs, so this is integrity against tampering after the pin was taken, not
 proof that Teleport authored the bytes. See the [repo README](https://github.com/pdutton/container-teleport-client#integrity-not-authenticity)
@@ -82,6 +106,7 @@ any purpose, and organizations under both the employee and revenue thresholds ab
 personal use or learning. If you create useful container images based on this one, please share
 the code you used to produce them so everyone can benefit.
 
-This repo's own code is licensed under AGPL-3.0-only, but **the Teleport binary this image ships
-is not open source** — it carries its own licence with the eligibility limit above. You must comply
-with *both* licences when using and extending this image.
+This repo's own code is licensed under AGPL-3.0-only, but **the Teleport binaries these images ship
+are not open source** — `tsh`, and `tctl` in the `admin` variant, come out of the same tarball under
+the same licence, with the eligibility limit above. You must comply with *both* licences when using
+and extending these images.
