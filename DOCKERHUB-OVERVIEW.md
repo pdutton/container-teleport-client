@@ -12,6 +12,13 @@ this Section 2 exists." If your organization is over either threshold, you
 have no licence to use this image. A copy of the licence ships inside the
 image at `/usr/share/doc/teleport/LICENSE-community`.
 
+The condition is on whoever is *exercising* the licence, not on who happens to
+type the command: pulling and running this image for your own, personal
+purposes is you exercising it as an individual and is covered regardless of
+your employer's size, but using it for your employer's benefit makes your
+employer the exercising party, so your employer's employee count and revenue
+are what govern instead. (A reading of the licence text, not legal advice.)
+
 ## Usage
 
 ```bash
@@ -52,15 +59,24 @@ for the isolated-network alternative.
 | `18.10` | the newest build on the Teleport 18.10 line published here |
 | `18.10.4` | this exact version |
 
+## Integrity, Not Authenticity
+
+The build pins a per-architecture SHA-256 digest for the `tsh` tarball it downloads, which stops a
+tarball silently republished under the same version name — but Teleport publishes no detached
+signature for these tarballs, so this is integrity against tampering after the pin was taken, not
+proof that Teleport authored the bytes. See the [repo README](https://github.com/pdutton/container-teleport-client#integrity-not-authenticity)
+for the full explanation.
+
 ## Source
 
 [github.com/pdutton/container-teleport-client](https://github.com/pdutton/container-teleport-client)
 
 ## Intended Audience
 
-Feel free to use this container image for personal use or learning. If you create useful
-container images based on this one, please share the code you used to produce them so everyone can
-benefit.
+This image is for anyone the Teleport Community Edition License actually covers: individuals for
+any purpose, and organizations under both the employee and revenue thresholds above — not just
+personal use or learning. If you create useful container images based on this one, please share
+the code you used to produce them so everyone can benefit.
 
 This repo's own code is licensed under AGPL-3.0-only, but **the Teleport binary this image ships
 is not open source** — it carries its own licence with the eligibility limit above. You must comply
