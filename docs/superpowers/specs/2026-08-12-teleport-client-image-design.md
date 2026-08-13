@@ -252,7 +252,11 @@ same `tsh`, because the build refuses to proceed on anything but the exact bytes
 a human reviewed and recorded on a stated date.
 
 The cost is that nothing announces a new patch release. Bumping is a deliberate
-two-line edit (D4) and is the intended way to pick up a Teleport security fix.
+edit to four things, not one — `TELEPORT_VERSION` in the Makefile,
+`ARG TELEPORT_VERSION` in the Containerfile, both per-architecture
+`ARG TELEPORT_SHA256_AMD64` / `ARG TELEPORT_SHA256_ARM64` digests in the
+Containerfile (D6), and the version named in `README.md` (D4) — and is the
+intended way to pick up a Teleport security fix.
 
 18.10.4 is the newest patch on the 18.10 line as of 2026-08-12
 (`teleport-v18.10.5-...` returns 404).

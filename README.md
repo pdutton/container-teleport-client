@@ -134,8 +134,10 @@ Running as root, with rootless podman doing the UID mapping, avoids that failure
 | `openssh-client` (`ssh`, `scp`) | no — `tsh ssh` speaks the protocol itself |
 
 The image is built for the two goals above: logging in and tunnelling a port. Cluster
-administration (`tctl`) goes through the auth server via `SETUP-CLIENT.md`'s `make ssh` path
-instead, and the server binary has no place in a client image at all.
+administration (`tctl`) is out of scope for this image — reach the auth server directly (SSH
+access to the host it runs on, or Teleport's own
+[`tctl` reference](https://goteleport.com/docs/reference/cli/tctl/)) instead, and the server
+binary has no place in a client image at all.
 
 If you want `ssh`, `scp`, or `tsh proxy ssh` as an OpenSSH `ProxyCommand`, add `openssh-client` in
 a derived image:
