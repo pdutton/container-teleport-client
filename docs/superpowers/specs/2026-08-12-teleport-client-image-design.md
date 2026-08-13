@@ -162,12 +162,20 @@ The condition is on who is **exercising** the licence, not on who happens to be
 typing the command: the party exercising the licence must itself be an
 individual or a qualifying organization. An employee at a 500-employee company
 who uses this image for their own, personal purposes is exercising it as an
-individual and is covered; the same employee using it on their employer's
-behalf makes the employer the exercising party, and the employer's size and
-revenue govern. This is what reconciles "an individual is covered whatever
-their employer's size" with "if your organization is over either threshold,
-you have no licence to use this image" — both are true, for different parties
-exercising the licence in different capacities.
+individual and is covered.
+
+Where that stops being clear-cut — the same employee using it on their
+employer's behalf — this spec deliberately reaches **no** conclusion, and
+neither do `README.md` and `DOCKERHUB-OVERVIEW.md`. All three state the
+condition and refer the reader to their own legal department. An earlier draft
+of all three asserted that the employer becomes the exercising party and that
+its size and revenue govern; that is a plausible reading, but it is a legal
+determination this repo is not the right place to make on a reader's behalf,
+and the wording was withdrawn on 2026-08-13.
+
+What the spec still needs from this section is narrower and does survive: an
+individual is covered whatever their employer's size, which is what makes
+publishing this image permitted for its author (D10).
 
 **Redistribution is permitted, with an attached condition.** §4 allows
 reproduction and distribution of the Work "in any medium, with or without

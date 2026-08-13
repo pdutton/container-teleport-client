@@ -15,9 +15,8 @@ image at `/usr/share/doc/teleport/LICENSE-community`.
 The condition is on whoever is *exercising* the licence, not on who happens to
 type the command: pulling and running this image for your own, personal
 purposes is you exercising it as an individual and is covered regardless of
-your employer's size, but using it for your employer's benefit makes your
-employer the exercising party, so your employer's employee count and revenue
-are what govern instead. (A reading of the licence text, not legal advice.)
+your employer's size, but using it for your employer's benefit is a question to
+put to your company's legal department.
 
 ## Usage
 
