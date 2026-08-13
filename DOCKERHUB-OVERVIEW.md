@@ -22,13 +22,13 @@ put to your company's legal department.
 
 ```bash
 mkdir -p ~/.tsh   # podman does not create a bind mount's source directory for you
-alias tsh='podman run -ti --rm -v "$HOME/.tsh":/root/.tsh docker.io/pdutton/teleport-client:latest tsh'
+alias tsh='podman run -ti --rm -v "$HOME/.tsh":/root/.tsh:z docker.io/pdutton/teleport-client:latest tsh'
 
 tsh login --proxy=teleport.example.com claude
 tsh ssh claude@teleport-node
 ```
 
-`-v "$HOME/.tsh":/root/.tsh` shares your host's Teleport identity with the container — log in once
+`-v "$HOME/.tsh":/root/.tsh:z` shares your host's Teleport identity with the container — log in once
 from either side and both can use the session. `podman run -ti` is required: `tsh login` needs a
 real terminal for the password and MFA prompts and will not accept a pipe.
 
@@ -36,10 +36,15 @@ The `mkdir -p ~/.tsh` matters on a brand-new host: podman's rootless bind mounts
 source directory for you, so without it the very first login fails with
 `statfs ...: no such file or directory`. Harmless to repeat if `~/.tsh` already exists.
 
+The `:z` matters on a host running SELinux in enforcing mode (Fedora, RHEL and derivatives):
+without it the login fails with `mkdir /root/.tsh/keys: permission denied`. It relabels the
+directory so both the container and the host keep access, and is a no-op elsewhere. Use `:z`, not
+`:Z`, and only on a dedicated directory like `~/.tsh` — never on `$HOME` itself.
+
 ## Tunnelling a Port
 
 ```bash
-podman run -ti --rm --network=host -v "$HOME/.tsh":/root/.tsh \
+podman run -ti --rm --network=host -v "$HOME/.tsh":/root/.tsh:z \
   docker.io/pdutton/teleport-client:latest \
   tsh ssh -N -L 5901:localhost:5901 claude@teleport-node
 ```
