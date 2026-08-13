@@ -1,0 +1,22 @@
+# Vim temporary files
+# Swap files, including the dot-prefixed form vim uses beside the edited file
+# (e.g. .Makefile.swp)
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-v][a-z]
+[._]sw[a-p]
+*.s[a-v][a-z]
+*.sw[a-p]
+
+# Backup files and persistent undo
+*~
+[._]*.un~
+*.un~
+
+# Session and netrw history
+Session.vim
+Sessionx.vim
+.netrwhist
+
+# Superpowers subagent workspace (process artifacts, not project content)
+.superpowers/

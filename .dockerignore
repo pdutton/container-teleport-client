@@ -1,0 +1,10 @@
+.git/
+.github/
+docs/
+test/
+Makefile
+README.md
+DOCKERHUB-OVERVIEW.md
+CLAUDE.md
+LICENSE
+.superpowers/
