@@ -33,13 +33,6 @@ jobs:
       # Default checkout depth is fine: the Makefile's `git rev-parse HEAD`
       # works at depth 1.
 
-      - name: TEMPORARY diagnostic - where are the tools?
-        run: |
-          echo "podman on PATH: $(command -v podman || echo NONE)"
-          echo "awk on PATH:    $(command -v awk || echo NONE)"
-          ls -l /usr/bin/podman /usr/local/bin/podman /usr/bin/awk 2>&1 || true
-          podman --version || true
-
       - name: Ensure podman
         run: |
           if ! command -v podman >/dev/null; then
