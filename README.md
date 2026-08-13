@@ -19,6 +19,7 @@ image at `/usr/share/doc/teleport/LICENSE-community`.
 ## Log in and Connect
 
 ```bash
+mkdir -p ~/.tsh   # podman does not create a bind mount's source directory for you
 alias tsh='podman run -ti --rm -v "$HOME/.tsh":/root/.tsh docker.io/pdutton/teleport-client:latest tsh'
 
 tsh login --proxy=teleport.example.com claude
@@ -34,9 +35,9 @@ side, and both can use the session. The reverse also holds: a `tsh logout` run i
 container logs the host out too. See [Persisting the Identity](#persisting-the-identity) below
 for the isolated alternative.
 
-Podman does not create a bind mount's source directory for you. If this is the very first time you
-are using `tsh` on this host, `~/.tsh` will not exist yet and the run above fails with
-`statfs ...: no such file or directory`. Run `mkdir -p ~/.tsh` once before the first login.
+The `mkdir -p ~/.tsh` above matters on a brand-new host: podman's rootless bind mounts do not
+create the source directory for you, so without it the run fails on the very first login with
+`statfs ...: no such file or directory`. Harmless to repeat if `~/.tsh` already exists.
 
 Creating the cluster user and enrolling a second factor is a cluster-side step this repo does not
 cover; see `~/projects/teleport/primary/SETUP-CLIENT.md` for that.

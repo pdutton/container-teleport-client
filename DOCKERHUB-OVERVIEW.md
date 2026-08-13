@@ -15,6 +15,7 @@ image at `/usr/share/doc/teleport/LICENSE-community`.
 ## Usage
 
 ```bash
+mkdir -p ~/.tsh   # podman does not create a bind mount's source directory for you
 alias tsh='podman run -ti --rm -v "$HOME/.tsh":/root/.tsh docker.io/pdutton/teleport-client:latest tsh'
 
 tsh login --proxy=teleport.example.com claude
@@ -25,8 +26,9 @@ tsh ssh claude@teleport-node
 from either side and both can use the session. `podman run -ti` is required: `tsh login` needs a
 real terminal for the password and MFA prompts and will not accept a pipe.
 
-If `~/.tsh` doesn't exist yet (first run), create it first — `mkdir -p ~/.tsh` — podman does not
-create a bind mount's source directory for you.
+The `mkdir -p ~/.tsh` matters on a brand-new host: podman's rootless bind mounts do not create the
+source directory for you, so without it the very first login fails with
+`statfs ...: no such file or directory`. Harmless to repeat if `~/.tsh` already exists.
 
 ## Tunnelling a Port
 
