@@ -366,12 +366,30 @@ between Community and Enterprise here, so it gets a comment at the download line
 ### D7. Identity persists by bind-mounting the host's `~/.tsh`
 
 The image runs as root with `HOME=/root` and mounts nothing itself. The
-documented invocation is `-v "$HOME/.tsh":/root/.tsh`.
+documented invocation is `-v "$HOME/.tsh":/root/.tsh:z`.
 
 Under rootless podman, container-root maps to the invoking user's host UID, so
 the bind mount's ownership and `tsh`'s own `0700` permission checks line up with
 no `--userns=keep-id` and no `chown`. One identity is shared between the
 container and any `tsh` on the host: log in once, use either.
+
+**The `:z` suffix is required, and this spec originally omitted it.** Ownership
+is not the only thing that can deny access: on a host running SELinux in
+enforcing mode, an unlabelled bind mount is denied outright and the first login
+fails with `mkdir /root/.tsh/keys: permission denied` — a message that reads
+like a file-permission problem rather than a labelling one. `:z` applies a
+shared container label, keeping the directory usable from both the container and
+the host's own `tsh`; `:Z` would take it away from the host, and neither belongs
+anywhere near `$HOME` itself.
+
+The omission survived every review because all verification ran on WSL2, where
+SELinux is not enforcing, so the unlabelled mount worked here and would have
+failed for every Fedora/RHEL user. The `Makefile` had `,z` on its own test mount
+the whole time — the inconsistency between the two was visible in the repo and
+still went unnoticed. Reported from a real SELinux host on 2026-08-13 and fixed
+the same day.
+
+A named volume needs no suffix: podman labels volumes it creates itself.
 
 The trade-off is that a `tsh logout` inside the container also logs the host out.
 That is the correct behaviour for a *shared* identity and is documented, not
@@ -391,7 +409,7 @@ records the same constraint for scripting (drive it through a pty).
 Host networking, the quick path:
 
 ```bash
-podman run -ti --rm --network=host -v "$HOME/.tsh":/root/.tsh \
+podman run -ti --rm --network=host -v "$HOME/.tsh":/root/.tsh:z \
   docker.io/pdutton/teleport-client:latest \
   tsh ssh -N -L 5901:localhost:5901 claude@teleport-node
 ```
@@ -404,7 +422,7 @@ is no network isolation at all.
 Isolated namespace, the alternative:
 
 ```bash
-podman run -ti --rm -p 127.0.0.1:5901:5901 -v "$HOME/.tsh":/root/.tsh \
+podman run -ti --rm -p 127.0.0.1:5901:5901 -v "$HOME/.tsh":/root/.tsh:z \
   docker.io/pdutton/teleport-client:latest \
   tsh ssh -N -L 0.0.0.0:5901:localhost:5901 claude@teleport-node
 ```

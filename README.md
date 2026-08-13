@@ -26,7 +26,7 @@ put to your company's legal department.
 
 ```bash
 mkdir -p ~/.tsh   # podman does not create a bind mount's source directory for you
-alias tsh='podman run -ti --rm -v "$HOME/.tsh":/root/.tsh docker.io/pdutton/teleport-client:latest tsh'
+alias tsh='podman run -ti --rm -v "$HOME/.tsh":/root/.tsh:z docker.io/pdutton/teleport-client:latest tsh'
 
 tsh login --proxy=teleport.example.com:443 --user=claude   # "claude" here is your Teleport username
 tsh ls                                                      # list the nodes you can reach, and their names
@@ -44,7 +44,7 @@ This alias is not a full drop-in for a locally installed `tsh`: only `~/.tsh` is
 local recording, `--identity` outside `~/.tsh`) will fail, and `-ti` interferes with piping its
 output.
 
-`-v "$HOME/.tsh":/root/.tsh` bind-mounts your host's Teleport identity into the container. It is
+`-v "$HOME/.tsh":/root/.tsh:z` bind-mounts your host's Teleport identity into the container. It is
 the *same* identity a `tsh` installed directly on the host would use — log in once, from either
 side, and both can use the session. The reverse also holds: a `tsh logout` run inside the
 container logs the host out too. See [Persisting the Identity](#persisting-the-identity) below
@@ -53,6 +53,17 @@ for the isolated alternative.
 The `mkdir -p ~/.tsh` above matters on a brand-new host: podman's rootless bind mounts do not
 create the source directory for you, so without it the run fails on the very first login with
 `statfs ...: no such file or directory`. Harmless to repeat if `~/.tsh` already exists.
+
+The `:z` on the end of the mount matters on any host running SELinux in enforcing mode — Fedora,
+RHEL and their derivatives. Without it, the container is denied access to the mounted directory
+and the first login fails with `mkdir /root/.tsh/keys: permission denied`, which reads like a
+file-permission problem rather than a labelling one. `:z` relabels the directory with a shared
+container label, so the container and a `tsh` installed on the host both keep access. It is a
+no-op where SELinux is not enforcing, so it is safe to leave in the command everywhere.
+
+Use `:z`, not `:Z`: the uppercase form applies a private per-container label, which takes the
+directory away from the host's own `tsh`. And apply either only to a dedicated directory like
+`~/.tsh` — a recursive relabel of `$HOME` is destructive and hard to undo.
 
 Creating the cluster user and enrolling a second factor is a cluster-side step this repo does not
 cover; see Teleport's own documentation on
@@ -70,7 +81,7 @@ container's only job is to carry the port.
 Host networking, the quick path:
 
 ```bash
-podman run -ti --rm --network=host -v "$HOME/.tsh":/root/.tsh \
+podman run -ti --rm --network=host -v "$HOME/.tsh":/root/.tsh:z \
   docker.io/pdutton/teleport-client:latest \
   tsh ssh -N -L 5901:localhost:5901 claude@teleport-node
 ```
@@ -83,7 +94,7 @@ isolation at all: the container can reach (and be reached on) everything the hos
 Isolated namespace, the alternative:
 
 ```bash
-podman run -ti --rm -p 127.0.0.1:5901:5901 -v "$HOME/.tsh":/root/.tsh \
+podman run -ti --rm -p 127.0.0.1:5901:5901 -v "$HOME/.tsh":/root/.tsh:z \
   docker.io/pdutton/teleport-client:latest \
   tsh ssh -N -L 0.0.0.0:5901:localhost:5901 claude@teleport-node
 ```
@@ -99,12 +110,16 @@ interfaces.
 The documented default is the bind mount shown above:
 
 ```bash
--v "$HOME/.tsh":/root/.tsh
+-v "$HOME/.tsh":/root/.tsh:z
 ```
 
 The image runs as root with `HOME=/root` and mounts nothing itself. Under rootless podman,
 container-root maps to the invoking user's host UID, so the bind mount's ownership and `tsh`'s own
-`0700` permission checks line up with no extra flags needed.
+`0700` permission checks line up without a `--userns` flag.
+
+Ownership is not the only thing that can deny access, though: on an SELinux host the label matters
+too, which is what the `:z` above is for. A named volume needs no such suffix — podman labels
+volumes it creates itself.
 
 For an identity isolated from the host's own `tsh`, use a named volume instead:
 
