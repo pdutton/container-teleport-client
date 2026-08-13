@@ -158,6 +158,17 @@ Million U.S. Dollars ($10,000,000.00) in annual revenue", and §2 closes with:
 employer's size, so publishing this image is permitted; a puller at a
 500-employee company has no grant at all. See D10.
 
+The condition is on who is **exercising** the licence, not on who happens to be
+typing the command: the party exercising the licence must itself be an
+individual or a qualifying organization. An employee at a 500-employee company
+who uses this image for their own, personal purposes is exercising it as an
+individual and is covered; the same employee using it on their employer's
+behalf makes the employer the exercising party, and the employer's size and
+revenue govern. This is what reconciles "an individual is covered whatever
+their employer's size" with "if your organization is over either threshold,
+you have no licence to use this image" — both are true, for different parties
+exercising the licence in different capacities.
+
 **Redistribution is permitted, with an attached condition.** §4 allows
 reproduction and distribution of the Work "in any medium, with or without
 modifications, and in Source or Object form", provided among other things:
@@ -230,9 +241,15 @@ The description label interpolates it rather than hardcoding a version, so the
 published label cannot advertise a version the image is not on.
 
 Pinning, rather than resolving, follows from M2: there is no index to resolve
-against. It also buys reproducibility that the sibling repos do not have — a
-rebuild always produces the same `tsh`, and podman's layer cache cannot serve a
-stale version while claiming to be current, because "current" is written down.
+against. On its own, though, pinning a version number only buys reproducibility
+against podman's layer cache — a rebuild on a cache hit serves whatever was
+fetched before, but a cache miss (any CI run on a fresh runner, or `--pull`)
+re-fetches from `cdn.teleport.dev` and trusts whatever bytes are served under
+that version's name at that moment. A republished tarball under the same
+version would pass the same-host `.sha256` check unnoticed. The per-architecture
+digest pin (D6) is what closes that gap: with it, a rebuild always produces the
+same `tsh`, because the build refuses to proceed on anything but the exact bytes
+a human reviewed and recorded on a stated date.
 
 The cost is that nothing announces a new patch release. Bumping is a deliberate
 two-line edit (D4) and is the intended way to pick up a Teleport security fix.
@@ -240,19 +257,38 @@ two-line edit (D4) and is the intended way to pick up a Teleport security fix.
 18.10.4 is the newest patch on the 18.10 line as of 2026-08-12
 (`teleport-v18.10.5-...` returns 404).
 
-### D4. The pin lives in three places, two of which are cross-checked
+### D4. The pin lives in three places, all three cross-checked
 
 | Where | Purpose | Cross-checked? |
 |---|---|---|
 | `ARG TELEPORT_VERSION` in `Containerfile` | what actually gets downloaded | yes |
 | `TELEPORT_VERSION` in `Makefile` | passed to the smoke test as `EXPECT_VERSION` | yes |
-| the version in `README.md` | documentation | **no** |
+| the version in `README.md` | documentation | yes — `make test` greps for it |
 
-The Makefile value is deliberately **not** passed as `--build-arg`. If it were,
-the two could never disagree and the assertion would be vacuous. Because they are
-independent, editing one alone does not break `podman build` — the image builds
-fine — it breaks `make test`, which is the safety net working as designed. The
-README will silently go stale; update it by hand in the same commit.
+The Makefile value is deliberately **not** passed as `--build-arg`. That is not
+because doing so would make the assertion vacuous — it would not. `EXPECT_VERSION`
+is compared against what the *binary itself reports* (`tsh version`), so even
+with a single source of truth for the version number, the assertion would still
+verify something real: that the tarball fetched from that URL actually contains
+a `tsh` that reports that version, and that the extraction pulled the right
+archive member. That is an upstream-correspondence check, not a tautology, and
+it would hold regardless of how many independent copies of the version number
+exist.
+
+What the split *does* buy, honestly stated: it catches a human editing one file
+and not the other. If `--build-arg` fed the Makefile's copy straight into the
+Containerfile, a maintainer who bumped only one of the two files could no longer
+be caught by `make test` diverging from the build — the two would trivially
+agree because they were never independent inputs to begin with. Because they
+are independent as written, editing one alone does not break `podman build` —
+the image builds fine — it breaks `make test`, which is the safety net working
+as designed.
+
+The README copy is no longer an exception: `make test` greps `README.md` for
+`$(TELEPORT_VERSION)` and fails loudly if it is absent, so all three copies are
+now checked against each other. It is still a plain text search, not a version
+parse — it confirms the number appears somewhere in the prose, not that every
+sentence mentioning it is accurate.
 
 ### D5. Contents: `tsh`, its licence, and a cert store — nothing else
 
@@ -280,21 +316,37 @@ Excluded, each for a reason:
 ### D6. Integrity is verified; authenticity is not, and the README says so
 
 The build downloads `teleport-v${VERSION}-linux-${arch}-bin.tar.gz` and the
-matching `.sha256` from `cdn.teleport.dev` and runs `sha256sum -c`.
+matching `.sha256` from `cdn.teleport.dev`, runs `sha256sum -c`, and then
+compares the tarball's digest against a **per-architecture pinned digest**
+recorded as an `ARG` in the Containerfile (`TELEPORT_SHA256_AMD64` /
+`TELEPORT_SHA256_ARM64`), refusing to proceed on a mismatch.
 
-**That checksum is served by the same host as the tarball**, so it proves the
-download was not corrupted in transit or truncated — not that Teleport authored
-the bytes. Teleport publishes no detached signature for these tarballs; the only
-GPG-verified distribution path is the apt repository, which was considered and
-rejected (it requires a published suite for Ubuntu 26.04's codename, it installs
-the full server package to extract one binary from, and it reintroduces exactly
-the resolve-at-build-time non-reproducibility D3 exists to avoid). TLS to
-`cdn.teleport.dev` is what carries the trust here.
+**The same-host `.sha256` alone is served by the same host as the tarball**, so
+on its own it proves only that the download was not corrupted in transit or
+truncated — not that Teleport authored the bytes, and not that the bytes are
+the same ones served under this version number yesterday. A republished
+tarball under the same version would pass that check unnoticed on every cache
+miss. The pinned digest closes that specific gap: it is a value a human
+verified against `cdn.teleport.dev` on a stated date (2026-08-12, for v18.10.4)
+and recorded independent of whatever the CDN serves later, so a later
+republication under the same name is caught rather than silently accepted.
+
+**This still is not authenticity.** The pin binds the build to bytes a human
+looked at on that date — it does not establish that Teleport authored those
+bytes, because the pin itself was taken from the same unsigned CDN download it
+now protects against *future* substitution. Teleport publishes no detached
+signature for these tarballs; the only GPG-verified distribution path is the
+apt repository, which was considered and rejected (it requires a published
+suite for Ubuntu 26.04's codename, it installs the full server package to
+extract one binary from, and it reintroduces exactly the resolve-at-build-time
+non-reproducibility D3 exists to avoid). TLS to `cdn.teleport.dev`, at pin time,
+is what carried whatever trust exists in the original bytes.
 
 This is a weaker guarantee than `container-terraform`'s pinned-GPG-key
 verification. It is stated plainly in the README rather than dressed up, because
 a checksum step *looks* like signature verification to a reader skimming the
-Containerfile.
+Containerfile. The digest pin narrows the gap (it defeats silent republication)
+without closing it (it still cannot prove authorship).
 
 The URL prefix is `teleport-`, not `teleport-ent-`. That is the entire difference
 between Community and Enterprise here, so it gets a comment at the download line.
@@ -382,17 +434,29 @@ same name over a new digest. Pin by digest for reproducibility.
 - `teleport`, `tctl`, `tbot`, `curl` and `wget` are all absent from `PATH` (D2,
   D5 — the exclusions are contract, not accident)
 - `/etc/ssl/certs/ca-certificates.crt` exists (M1)
-- `/usr/share/doc/teleport/LICENSE-community` exists and is non-empty. This is
-  the one assertion here that protects a licence obligation rather than a
-  feature: §4(a) requires the copy to reach recipients (M5), and a refactor of
-  the `COPY --from` lines could drop it without breaking anything a user would
-  notice
+- `/usr/share/doc/teleport/LICENSE-community` exists and contains text unique to
+  that licence (`grep -q "Teleport Community Edition License"`), not merely
+  that it is non-empty. This is the one assertion here that protects a licence
+  obligation rather than a feature: §4(a) requires the copy to reach recipients
+  (M5), and non-empty alone is too weak a check — `tsh` itself, or this repo's
+  own AGPL `LICENSE`, are also non-empty and would pass a size-only check if a
+  refactor of the `COPY --from` lines put either at that path by mistake
 - `$HOME` is `/root`, and `$HOME/.tsh` can be created and written — this is the
   mount point the README instructs people to bind (D7)
 
 It cannot verify a login: that needs a cluster, a password and a second factor.
 No network probe is included, so an upstream outage cannot turn the build red.
 Verifying the two goals end to end is a manual step after a version bump.
+
+`test/smoke.sh` runs inside the built image and cannot see image labels, so two
+further checks live in the Makefile's `test` recipe instead, run against the
+image from the outside via `podman image inspect`: that
+`org.opencontainers.image.licenses` is exactly
+`LicenseRef-Teleport-Community-Edition` (D10), and that
+`org.opencontainers.image.description` contains the pinned version — i.e. that
+the label actually interpolates `TELEPORT_VERSION` rather than a hand-typed
+string that could drift from it (D3). The same `test` recipe also greps
+`README.md` for the pinned version (D4).
 
 ### D10. Licensing: repo AGPL-3.0-only, image labelled `LicenseRef-Teleport-Community-Edition`
 
@@ -417,6 +481,15 @@ org.opencontainers.image.licenses="LicenseRef-Teleport-Community-Edition"
 which keeps the label a valid SPDX expression instead of free text an automated
 scanner would choke on. Labelling it `AGPL-3.0-only` would misdescribe the
 contents; labelling it `Apache-2.0` would understate the conditions.
+
+The label describes only the Teleport Community Edition licence, even though
+the image also contains Ubuntu base packages (their own, various, licences) and
+the Mozilla CA bundle shipped inside `ca-certificates` (MPL-2.0). Describing
+only the primary payload in a single-value licence label is conventional
+practice — OCI's own `image.licenses` label is documented as a best effort, not
+an exhaustive bill of materials, and most published images with a bundled base
+OS do the same — so the omission of the base image's and CA bundle's licences
+here is a decision, not an oversight.
 
 **The eligibility limit is the disclosure that matters.** README and
 `DOCKERHUB-OVERVIEW.md` must both state, prominently and in their own words, that
