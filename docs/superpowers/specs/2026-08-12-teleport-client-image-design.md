@@ -128,10 +128,51 @@ therefore valid, which makes the published-port tunnel variant in D8 viable.
 `tsh ssh --help` also lists `-N, --[no-]no-remote-exec  Don't execute remote
 command, useful for port forwarding` — the tunnel needs no remote shell.
 
-### M5. Community Edition is AGPL-3.0
+### M5. The distributed binary is under the Teleport Community Edition License, not AGPL
 
-The tarball contains `teleport/LICENSE-community`, and `teleport/README.md`
-links to `https://www.gnu.org/licenses/agpl-3.0.en.html`. See D10.
+Teleport's AGPL-3.0 applies to the **source** in their repository. The prebuilt
+Community binaries — which is what `cdn.teleport.dev` serves and what this image
+ships — are under a different licence. `teleport/README.md` in the tarball:
+
+> The remainder of the source code in this repository is available under the
+> [GNU Affero General Public License](./LICENSE). Users compiling Teleport from
+> source must comply with the terms of this license.
+>
+> Teleport Community Edition builds distributed on
+> http://goteleport.com/download are available under a
+> [modified Apache 2.0 license](./build.assets/LICENSE-community).
+
+The tarball carries that licence as `teleport/LICENSE-community`, headed
+"Teleport Community Edition License". Three provisions of it bear on this repo:
+
+**Eligibility is a condition of the grant.** "Legal Entity" is redefined as "an
+organization that has less than one hundred (100) employees and less than Ten
+Million U.S. Dollars ($10,000,000.00) in annual revenue", and §2 closes with:
+
+> For clarity, the requirement that the party exercising this license must be
+> either an individual or a Legal Entity is an express condition to the grant of
+> the foregoing license. If the conditions of this License are not met, no grant
+> of license under this Section 2 exists.
+
+§3 says the same for the patent grant. An individual is covered whatever their
+employer's size, so publishing this image is permitted; a puller at a
+500-employee company has no grant at all. See D10.
+
+**Redistribution is permitted, with an attached condition.** §4 allows
+reproduction and distribution of the Work "in any medium, with or without
+modifications, and in Source or Object form", provided among other things:
+
+> (a) You must give any other recipients of the Work or Derivative Works a copy
+> of this License
+
+Shipping `tsh` in a container image is such a distribution, so the licence file
+must travel inside the image. See D2 and D9.
+
+**No `NOTICE` file exists.** `tar -tzf ... | grep -i notice` finds nothing, so
+§4(d) imposes nothing here.
+
+This corrects an earlier reading of this design that took the binary to be
+AGPL-3.0 on the strength of the README's first licence link alone.
 
 ---
 
@@ -161,8 +202,14 @@ test the generalization against.
 
 Stage 1 is `alpine:3.23` with `curl`. It resolves the architecture, downloads the
 tarball and its `.sha256`, verifies the checksum, and extracts **only**
-`teleport/tsh` into `/out`. Stage 2 is `ubuntu:26.04`, installs `ca-certificates`
-with `--no-install-recommends`, and copies the single binary in.
+`teleport/tsh` and `teleport/LICENSE-community` into `/out`. Stage 2 is
+`ubuntu:26.04`, installs `ca-certificates` with `--no-install-recommends`, and
+copies both in — the binary to `/usr/local/bin/tsh`, the licence to
+`/usr/share/doc/teleport/LICENSE-community`.
+
+The licence file is not documentation garnish: §4(a) of the Community licence
+requires giving recipients a copy when redistributing, and publishing this image
+is a redistribution (M5). It is ~9 KB.
 
 Consequences, all intended:
 
@@ -207,10 +254,11 @@ independent, editing one alone does not break `podman build` — the image build
 fine — it breaks `make test`, which is the safety net working as designed. The
 README will silently go stale; update it by hand in the same commit.
 
-### D5. Contents: `tsh` and a cert store, nothing else
+### D5. Contents: `tsh`, its licence, and a cert store — nothing else
 
-`/usr/local/bin/tsh` and the `ca-certificates` package. Expected size ≈ 250 MB
-(112 MB base + 134 MB binary + certs).
+`/usr/local/bin/tsh`, `/usr/share/doc/teleport/LICENSE-community` (D2), and the
+`ca-certificates` package. Expected size ≈ 250 MB (112 MB base + 134 MB binary +
+certs).
 
 Excluded, each for a reason:
 
@@ -334,6 +382,11 @@ same name over a new digest. Pin by digest for reproducibility.
 - `teleport`, `tctl`, `tbot`, `curl` and `wget` are all absent from `PATH` (D2,
   D5 — the exclusions are contract, not accident)
 - `/etc/ssl/certs/ca-certificates.crt` exists (M1)
+- `/usr/share/doc/teleport/LICENSE-community` exists and is non-empty. This is
+  the one assertion here that protects a licence obligation rather than a
+  feature: §4(a) requires the copy to reach recipients (M5), and a refactor of
+  the `COPY --from` lines could drop it without breaking anything a user would
+  notice
 - `$HOME` is `/root`, and `$HOME/.tsh` can be created and written — this is the
   mount point the README instructs people to bind (D7)
 
@@ -341,16 +394,45 @@ It cannot verify a login: that needs a cluster, a password and a second factor.
 No network probe is included, so an upstream outage cannot turn the build red.
 Verifying the two goals end to end is a manual step after a version bump.
 
-### D10. Licensing splits: repo GPL-3.0-or-later, image AGPL-3.0
+### D10. Licensing: repo AGPL-3.0-only, image labelled `LicenseRef-Teleport-Community-Edition`
 
-The Containerfile, Makefile, test and docs in this repo are GPL-3.0-or-later,
-matching the siblings. The image carries
-`org.opencontainers.image.licenses="AGPL-3.0-only"`, describing the Teleport
-Community Edition binary it exists to deliver (M5).
+Two licences are in play and they cannot be collapsed into one.
 
-Redistributing the binary in an image is permitted. The README points at
-`github.com/gravitational/teleport` for the corresponding source, and states that
-a user of this image must comply with both licenses.
+**This repo's own code** — Containerfile, Makefile, smoke test, docs — is
+**AGPL-3.0-only**. This diverges from `container-ansible` and
+`container-terraform`, which are GPL-3.0-or-later; the choice is deliberate,
+aligning this repo with the licence on Teleport's own source repository rather
+than with its siblings. The `LICENSE` file holds the AGPL-3.0 text, and unlike
+the siblings there is no "or later" election to make in the README.
+
+**The binary the image ships** is under the Teleport Community Edition License
+(M5), which is neither AGPL nor stock Apache-2.0. SPDX has no identifier for it,
+so the image carries:
+
+```
+org.opencontainers.image.licenses="LicenseRef-Teleport-Community-Edition"
+```
+
+`LicenseRef-` is SPDX's own escape hatch for licences without an identifier,
+which keeps the label a valid SPDX expression instead of free text an automated
+scanner would choke on. Labelling it `AGPL-3.0-only` would misdescribe the
+contents; labelling it `Apache-2.0` would understate the conditions.
+
+**The eligibility limit is the disclosure that matters.** README and
+`DOCKERHUB-OVERVIEW.md` must both state, prominently and in their own words, that
+Teleport Community Edition is licensed only to individuals and to organizations
+with fewer than 100 employees and under $10M annual revenue — and that outside
+those bounds no grant exists, so the image cannot be used. This gets the same
+treatment `container-terraform` gives its BUSL note: stated plainly, not buried
+in a licence section at the bottom.
+
+The README also points at `github.com/gravitational/teleport` for source, and
+notes that the licence file travels inside the image at
+`/usr/share/doc/teleport/LICENSE-community`, so anyone redistributing a derived
+image inherits a copy and satisfies §4(a) by default.
+
+None of this is legal advice; it is a reading of the licence text quoted in M5,
+recorded so the next person can check it against the same source.
 
 ### D11. Repo layout, publishing, CI
 
