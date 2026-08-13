@@ -1,0 +1,406 @@
+# Teleport Client Image — Shape, Build, Tags, Usage
+
+**Written:** 2026-08-12
+**Repo:** `container-teleport-client` (GitHub), checked out under
+`~/projects/container-teleport/` in the worktree layout
+**Status:** design approved, implementation plan to follow
+
+This spec settles what this repo builds, how the build works, how it is tagged
+and published, and what the two usage goals look like from the command line. It
+is the first design document in this repo; nothing is carried over.
+
+---
+
+## Goals
+
+1. `tsh login` to a Teleport cluster and `tsh ssh` to a node through it, from a
+   container, on a host with no Teleport client installed.
+2. Hold open a `tsh ssh` port forward so a VNC viewer **on the host** can reach a
+   VNC server on the remote node.
+
+Non-goals are listed in "Out of scope" at the end.
+
+The tested manual recipe this replaces is the "Installing on Ubuntu" section of
+`~/projects/teleport/primary/SETUP-CLIENT.md`, which installs `tsh` and `tctl`
+from the CDN tarball onto a clean Ubuntu 26 VM. That document remains the
+authority for the *cluster-side* steps (creating a user, the invite URL, MFA
+enrollment); this image only replaces the client install.
+
+---
+
+## Measured facts
+
+All measured on 2026-08-12 on this machine, `podman 5.8.1` on WSL2.
+
+### M1. The Ubuntu base ships no CA store and no download tool
+
+```
+$ podman run --rm docker.io/library/ubuntu:26.04 sh -c \
+    'ls /etc/ssl/certs/ca-certificates.crt; dpkg -s ca-certificates | head -1'
+ls: cannot access '/etc/ssl/certs/ca-certificates.crt': No such file or directory
+dpkg-query: package 'ca-certificates' is not installed
+
+$ podman run --rm docker.io/library/ubuntu:26.04 sh -c \
+    'for b in tar gzip apt-get dpkg curl wget; do
+       printf "%-8s " "$b"; command -v "$b" || echo MISSING; done'
+tar      /usr/bin/tar
+gzip     /usr/bin/gzip
+apt-get  /usr/bin/apt-get
+dpkg     /usr/bin/dpkg
+curl     MISSING
+wget     MISSING
+```
+
+(One binary per iteration deliberately: `command -v a b c` inspects only its
+first argument in `dash`, so the compact form silently reports on `tar` alone.)
+
+`ca-certificates` must therefore be installed explicitly — `tsh` validates the
+proxy's Let's Encrypt certificate and has no bundled trust store.
+
+This also settles the TODO in `SETUP-CLIENT.md` ("consider reworking to use wget
+instead of curl since it already exists on a clean ubuntu 26 install"): that
+choice exists because a live VM already has one of the two. The container base
+has **neither**, so a container build does not have to choose — the download
+happens in a stage that is discarded. See D2.
+
+### M2. There is no usable release index for Teleport
+
+```
+$ curl -fsS https://updates.releases.teleport.dev/v1/stable/v18/version    → 404
+$ curl -fsS https://updates.releases.teleport.dev/v1/stable/oss/version    → 404
+$ curl -fsS https://updates.releases.teleport.dev/v1/stable/cloud/version  → v14.4.1
+$ curl -fsS https://cdn.teleport.dev/teleport-latest-linux-amd64-bin.tar.gz.sha256 → 404
+```
+
+The only endpoint that answers is the `cloud` channel, which reports v14.4.1 and
+has nothing to do with the self-hosted community line.
+
+The GitHub releases API is not an index either — it does not list every published
+version:
+
+```
+$ curl -fsS 'https://api.github.com/repos/gravitational/teleport/releases?per_page=30' \
+    | grep tag_name | head -3
+    "tag_name": "v18.10.0"
+    "tag_name": "v18.10.0-rc.2"
+    "tag_name": "v18.10.0-rc.1"
+
+$ curl -fsSI https://cdn.teleport.dev/teleport-v18.10.4-linux-amd64-bin.tar.gz | head -1
+HTTP/2 200
+```
+
+18.10.4 is served by the CDN and does not appear in the GitHub release list at
+all. Any "newest release on the 18 line" resolver built on that API would have
+pinned 18.10.0 while believing itself current — worse than an honest hand-pinned
+version, because it would look automatic.
+
+This is why the `container-terraform` pattern (resolve the newest release on a
+declared minor line at build time) is **not** reproduced here. See D3.
+
+### M3. Binary sizes in the tarball
+
+```
+$ tar -tzvf teleport-v18.10.4-linux-amd64-bin.tar.gz | sort -k3 -nr | head -5
+-rwxr-xr-x ci/ci 373848808  teleport/teleport
+-rwxr-xr-x ci/ci 133824840  teleport/tsh
+-rwxr-xr-x ci/ci 110929992  teleport/tctl
+-rwxr-xr-x ci/ci 110661816  teleport/tbot
+-rwxr-xr-x ci/ci  61735096  teleport/teleport-update
+```
+
+`tsh` is 134 MB; `tctl` would add 111 MB — 44% on top of the shipping payload.
+The 217 MB download is entirely discarded except for `tsh`.
+
+### M4. `tsh ssh -L` accepts a bind address, and `-N` exists
+
+```
+$ tsh ssh --proxy=example.invalid:443 -L 0.0.0.0:5901:localhost:5901 user@node true
+ERROR: Get "https://example.invalid:443/webapi/ping": ... no such host
+
+$ tsh ssh --proxy=example.invalid:443 -L bogus user@node true
+ERROR: invalid port forwarding spec 'bogus': expected format `80:remote.host:80`
+```
+
+The four-part form reaches the network call, so it parses; the malformed spec is
+rejected at parse time. Both `[bind:]port:host:port` and `port:host:port` are
+therefore valid, which makes the published-port tunnel variant in D8 viable.
+
+`tsh ssh --help` also lists `-N, --[no-]no-remote-exec  Don't execute remote
+command, useful for port forwarding` — the tunnel needs no remote shell.
+
+### M5. Community Edition is AGPL-3.0
+
+The tarball contains `teleport/LICENSE-community`, and `teleport/README.md`
+links to `https://www.gnu.org/licenses/agpl-3.0.en.html`. See D10.
+
+---
+
+## Decisions
+
+### D1. One image, one `Containerfile`, Ubuntu only
+
+Teleport ships glibc-linked binaries and no musl build, so Alpine is not an
+option for the *runtime* image and there is no second OS to support. There is
+also no development/prerelease channel: this image tracks whatever the cluster
+it talks to runs, and a prerelease client has no audience here.
+
+With one OS and one channel there is nothing for a variant axis to vary over, so
+the build file is a plain **`Containerfile`** with no extension and no suffix,
+and the Makefile has plain targets rather than `%`-pattern rules. This is a
+deliberate divergence from `container-ansible` (four variants) and
+`container-terraform` (two channels) — those repos need the axis; this one does
+not, and carrying the machinery anyway would mean a `VARIANTS` list of length
+one, a variant-shape guard protecting against a collision that cannot occur, and
+a CI matrix with a single leg.
+
+If a second variant ever becomes real, reintroducing the axis is a mechanical
+change against a working repo, and it can be done *then* with a real sibling to
+test the generalization against.
+
+### D2. Two-stage build; the final image has no download tool
+
+Stage 1 is `alpine:3.23` with `curl`. It resolves the architecture, downloads the
+tarball and its `.sha256`, verifies the checksum, and extracts **only**
+`teleport/tsh` into `/out`. Stage 2 is `ubuntu:26.04`, installs `ca-certificates`
+with `--no-install-recommends`, and copies the single binary in.
+
+Consequences, all intended:
+
+- No download tool reaches the shipping image: the base has neither `curl` nor
+  `wget` (M1) and the build adds neither. (`tar` and `gzip` *are* in the base —
+  `dpkg` depends on them — so they stay; the claim is about fetching, not
+  unpacking.)
+- The 217 MB tarball and the 373 MB `teleport` server binary never occupy a layer
+  in the published image.
+- Alpine is the downloader base for consistency with `container-terraform`, and
+  because it carries `curl` and a working cert store in ~9 MB.
+
+### D3. The version is pinned exactly, at 18.10.4
+
+`ARG TELEPORT_VERSION=18.10.4`, declared **once before the first `FROM`** so it
+is global and both stages take it into scope with a bare `ARG TELEPORT_VERSION`.
+The description label interpolates it rather than hardcoding a version, so the
+published label cannot advertise a version the image is not on.
+
+Pinning, rather than resolving, follows from M2: there is no index to resolve
+against. It also buys reproducibility that the sibling repos do not have — a
+rebuild always produces the same `tsh`, and podman's layer cache cannot serve a
+stale version while claiming to be current, because "current" is written down.
+
+The cost is that nothing announces a new patch release. Bumping is a deliberate
+two-line edit (D4) and is the intended way to pick up a Teleport security fix.
+
+18.10.4 is the newest patch on the 18.10 line as of 2026-08-12
+(`teleport-v18.10.5-...` returns 404).
+
+### D4. The pin lives in three places, two of which are cross-checked
+
+| Where | Purpose | Cross-checked? |
+|---|---|---|
+| `ARG TELEPORT_VERSION` in `Containerfile` | what actually gets downloaded | yes |
+| `TELEPORT_VERSION` in `Makefile` | passed to the smoke test as `EXPECT_VERSION` | yes |
+| the version in `README.md` | documentation | **no** |
+
+The Makefile value is deliberately **not** passed as `--build-arg`. If it were,
+the two could never disagree and the assertion would be vacuous. Because they are
+independent, editing one alone does not break `podman build` — the image builds
+fine — it breaks `make test`, which is the safety net working as designed. The
+README will silently go stale; update it by hand in the same commit.
+
+### D5. Contents: `tsh` and a cert store, nothing else
+
+`/usr/local/bin/tsh` and the `ca-certificates` package. Expected size ≈ 250 MB
+(112 MB base + 134 MB binary + certs).
+
+Excluded, each for a reason:
+
+- **`tctl`** — 111 MB (M3) for an administrative tool in a client image. It can
+  drive a remote cluster using a `tsh` profile, so this is a real trade, but the
+  goals are login, ssh and a tunnel; cluster administration goes through
+  `SETUP-CLIENT.md`'s `make ssh` path to the auth server.
+- **`teleport`** (the server) — 373 MB, and `SETUP-CLIENT.md`'s verification step
+  explicitly asserts `which teleport` finds nothing on a client.
+- **`tbot`**, **`teleport-update`** — machine identity and self-update, neither
+  of which applies to a pinned client image.
+- **`openssh-client`** — `tsh ssh` speaks the protocol itself and needs no `ssh`
+  binary; the tunnel in D8 is pure `tsh`. Anyone wanting `ssh`, `scp` or
+  `tsh proxy ssh` as an OpenSSH `ProxyCommand` can add it in a derived image, and
+  the README says so.
+
+`WORKDIR /apps` and `CMD ["tsh", "--help"]` follow the sibling convention.
+
+### D6. Integrity is verified; authenticity is not, and the README says so
+
+The build downloads `teleport-v${VERSION}-linux-${arch}-bin.tar.gz` and the
+matching `.sha256` from `cdn.teleport.dev` and runs `sha256sum -c`.
+
+**That checksum is served by the same host as the tarball**, so it proves the
+download was not corrupted in transit or truncated — not that Teleport authored
+the bytes. Teleport publishes no detached signature for these tarballs; the only
+GPG-verified distribution path is the apt repository, which was considered and
+rejected (it requires a published suite for Ubuntu 26.04's codename, it installs
+the full server package to extract one binary from, and it reintroduces exactly
+the resolve-at-build-time non-reproducibility D3 exists to avoid). TLS to
+`cdn.teleport.dev` is what carries the trust here.
+
+This is a weaker guarantee than `container-terraform`'s pinned-GPG-key
+verification. It is stated plainly in the README rather than dressed up, because
+a checksum step *looks* like signature verification to a reader skimming the
+Containerfile.
+
+The URL prefix is `teleport-`, not `teleport-ent-`. That is the entire difference
+between Community and Enterprise here, so it gets a comment at the download line.
+
+### D7. Identity persists by bind-mounting the host's `~/.tsh`
+
+The image runs as root with `HOME=/root` and mounts nothing itself. The
+documented invocation is `-v "$HOME/.tsh":/root/.tsh`.
+
+Under rootless podman, container-root maps to the invoking user's host UID, so
+the bind mount's ownership and `tsh`'s own `0700` permission checks line up with
+no `--userns=keep-id` and no `chown`. One identity is shared between the
+container and any `tsh` on the host: log in once, use either.
+
+The trade-off is that a `tsh logout` inside the container also logs the host out.
+That is the correct behaviour for a *shared* identity and is documented, not
+worked around.
+
+A named volume is documented as the alternative for anyone wanting isolation. A
+non-root user was rejected: bind-mounting the host's `~/.tsh` would then need
+`--userns=keep-id`, and getting it wrong produces a `tsh` permission error that
+reads like a `tsh` bug rather than a mount problem.
+
+`podman run -ti` is required, not cosmetic — `tsh login` needs a real terminal
+for the password and MFA prompts and will not accept a pipe. `SETUP-CLIENT.md`
+records the same constraint for scripting (drive it through a pty).
+
+### D8. The tunnel is documented two ways, host networking first
+
+Host networking, the quick path:
+
+```bash
+podman run -ti --rm --network=host -v "$HOME/.tsh":/root/.tsh \
+  docker.io/pdutton/teleport-client:latest \
+  tsh ssh -N -L 5901:localhost:5901 claude@teleport-node
+```
+
+The container shares the host's network namespace, so `tsh`'s default 127.0.0.1
+bind *is* the host loopback and a viewer connects to `localhost:5901` with
+nothing further configured. The forward stays on loopback, not the LAN. The cost
+is no network isolation at all.
+
+Isolated namespace, the alternative:
+
+```bash
+podman run -ti --rm -p 127.0.0.1:5901:5901 -v "$HOME/.tsh":/root/.tsh \
+  docker.io/pdutton/teleport-client:latest \
+  tsh ssh -N -L 0.0.0.0:5901:localhost:5901 claude@teleport-node
+```
+
+Only the one port crosses the namespace boundary. Two caveats are documented: the
+port is named twice in two different syntaxes, and the `0.0.0.0` bind inside the
+container is reachable by anything else on that container network.
+
+`-N` (M4) holds the forward open without starting a remote shell.
+
+No VNC client ships in the image. The viewer runs on the host; the container's
+only job is to carry the port.
+
+### D9. Tags, and the offline smoke test
+
+Four tags, all derived by reading `tsh version` back out of the freshly built
+image so they cannot drift from what is installed:
+
+`latest` · `18` · `18.10` · `18.10.4`
+
+There is no `ubuntu` tag. With a single image it would be a permanent alias of
+`latest` — a second name meaning exactly the same thing, to be kept in sync for
+no benefit. The base OS is a README fact. (`container-ansible` publishes an
+`ubuntu` tag because it also publishes `alpine`; that contrast is what gives the
+name meaning there.) A bare major tag `18` is safe here for the same reason it is
+unsafe in `container-terraform`: there is one image, so nothing else can claim
+it.
+
+Every tag is mutable, version tags included — a rebuild of 18.10.4 re-pushes the
+same name over a new digest. Pin by digest for reproducibility.
+
+`test/smoke.sh` runs entirely offline inside the built image, with
+`EXPECT_VERSION` supplied by the Makefile (D4). It asserts:
+
+- `/usr/local/bin/tsh` exists and is executable — the path is the contract for
+  anyone building `FROM` this image or `COPY --from`ing out of it, so it is
+  asserted directly rather than inferred from `tsh` being on `PATH`
+- `tsh version` reports exactly `EXPECT_VERSION`
+- `teleport`, `tctl`, `tbot`, `curl` and `wget` are all absent from `PATH` (D2,
+  D5 — the exclusions are contract, not accident)
+- `/etc/ssl/certs/ca-certificates.crt` exists (M1)
+- `$HOME` is `/root`, and `$HOME/.tsh` can be created and written — this is the
+  mount point the README instructs people to bind (D7)
+
+It cannot verify a login: that needs a cluster, a password and a second factor.
+No network probe is included, so an upstream outage cannot turn the build red.
+Verifying the two goals end to end is a manual step after a version bump.
+
+### D10. Licensing splits: repo GPL-3.0-or-later, image AGPL-3.0
+
+The Containerfile, Makefile, test and docs in this repo are GPL-3.0-or-later,
+matching the siblings. The image carries
+`org.opencontainers.image.licenses="AGPL-3.0-only"`, describing the Teleport
+Community Edition binary it exists to deliver (M5).
+
+Redistributing the binary in an image is permitted. The README points at
+`github.com/gravitational/teleport` for the corresponding source, and states that
+a user of this image must comply with both licenses.
+
+### D11. Repo layout, publishing, CI
+
+```
+Containerfile
+Makefile
+test/smoke.sh
+.github/workflows/build.yml
+README.md
+DOCKERHUB-OVERVIEW.md
+CLAUDE.md
+.dockerignore
+.gitignore
+LICENSE
+```
+
+Published to **`docker.io/pdutton/teleport-client`**. The `-client` suffix is
+load-bearing: `pdutton/teleport` would read as a cluster image to anyone browsing
+Docker Hub, and would claim the obvious name that a future server or agent image
+should get.
+
+The Makefile keeps the sibling conventions that are not variant machinery:
+`LOCAL_IMAGE = localhost/$(IMAGE)` used for every local reference (a bare short
+name can resolve to a non-localhost repo, and the push source must not depend on
+that tie-break); `TAG_SET_SH` expanded by both `tag` and `push` so the tag scheme
+is written once; the version-readback tagging pass; `push` depending on `test` so
+a failing smoke test blocks the publish; and a `clean` scoped to this repo's own
+tags.
+
+`.github/workflows/build.yml` mirrors the siblings without the matrix: build and
+smoke-test on pull requests, publish only from `master` (a `workflow_dispatch`
+against another branch still builds and tests but publishes nothing), and a
+separate `dockerhub-description` job — `needs: build`, master-only, pinned to a
+commit SHA because it is a third-party action handling a write-scoped token —
+that syncs `DOCKERHUB-OVERVIEW.md` to the Hub page.
+
+---
+
+## Out of scope
+
+- **No development or prerelease channel.** One pinned version.
+- **No multi-arch manifest.** The build maps `uname -m` to the right download, so
+  it is correct on whatever host runs it, but only a single-arch image is
+  published. Listed under "Planned" in the README, as in the siblings.
+- **No `tctl`, no server binary, no VNC client** (D5, D8).
+- **No scheduled rebuild.** A Teleport patch release or an Ubuntu base fix
+  reaches the published image only when someone bumps the pin or re-runs the
+  workflow.
+- **No cluster-side changes.** Creating users, roles and MFA enrollment stay in
+  `~/projects/teleport/primary/SETUP-CLIENT.md`.
+- **No change to the teleport repo.** M1 resolves that repo's curl-vs-wget TODO
+  for the container case only; whether to update `SETUP-CLIENT.md` is a separate
+  decision in a separate repo.
