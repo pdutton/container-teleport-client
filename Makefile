@@ -272,7 +272,7 @@ stamp-image:
 #   3. org.opencontainers.image.description contains the pinned version, i.e.
 #      the label actually interpolates TELEPORT_VERSION rather than a
 #      hand-typed string that could drift from it (D3).
-test: build
+test:
 	@grep -q '$(TELEPORT_VERSION)' README.md || { \
 	  echo "FAIL: README.md does not mention $(TELEPORT_VERSION); the version pin" >&2; \
 	  echo "      has three copies (Containerfile, Makefile, README.md) and this" >&2; \
@@ -280,31 +280,41 @@ test: build
 	  echo "      same commit as any version bump." >&2; \
 	  exit 1; \
 	}
-	@$(MAKE) --no-print-directory test-variant VARIANT=tsh
-	@$(MAKE) --no-print-directory test-variant VARIANT=admin
+	@$(MAKE) --no-print-directory test-arch ARCH=amd64
+	@$(MAKE) --no-print-directory test-arch ARCH=arm64
 
-test-variant:
+# build-arch is a prerequisite rather than something `test` depends on, so that
+# a CI runner can say `make test-arch ARCH=arm64` and get the build for free.
+# ARCH is a command-line variable in that invocation, so it reaches the
+# prerequisite too.
+test-arch: build-arch
+	@set -eu; $(REQUIRE_ARCH_SH)
+	@$(MAKE) --no-print-directory test-image VARIANT=tsh   ARCH=$(ARCH)
+	@$(MAKE) --no-print-directory test-image VARIANT=admin ARCH=$(ARCH)
+
+test-image:
 	@set -eu; $(REQUIRE_VARIANT_SH)
+	@set -eu; $(REQUIRE_ARCH_SH)
 	@set -eu; \
 	expected="LicenseRef-Teleport-Community-Edition"; \
-	actual=$$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT))); \
+	actual=$$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' $(LOCAL_IMAGE):$(ARCH_TAG)); \
 	[ "$$actual" = "$$expected" ] || { \
-	  echo "FAIL: $(VARIANT): org.opencontainers.image.licenses label is '$$actual', expected '$$expected'" >&2; \
+	  echo "FAIL: $(VARIANT)/$(ARCH): org.opencontainers.image.licenses label is '$$actual', expected '$$expected'" >&2; \
 	  exit 1; \
 	}
 	@set -eu; \
 	expected="$(DESC_$(VARIANT))"; \
-	actual=$$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.description"}}' $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT))); \
+	actual=$$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.description"}}' $(LOCAL_IMAGE):$(ARCH_TAG)); \
 	[ "$$actual" = "$$expected" ] || { \
-	  echo "FAIL: $(VARIANT): org.opencontainers.image.description label is '$$actual', expected '$$expected'" >&2; \
+	  echo "FAIL: $(VARIANT)/$(ARCH): org.opencontainers.image.description label is '$$actual', expected '$$expected'" >&2; \
 	  echo "      (expected the pinned version $(TELEPORT_VERSION) interpolated into it)" >&2; \
 	  exit 1; \
 	}
-	$(PODMAN) run --rm -v ./test:/apps:ro,z \
+	$(PODMAN) run --rm --platform $(PLATFORM_$(ARCH)) -v ./test:/apps:ro,z \
 	  -e EXPECT_VERSION=$(TELEPORT_VERSION) \
 	  -e EXPECT_TCTL=$(EXPECT_TCTL_$(VARIANT)) \
-	  -e EXPECT_ARCH=$(HOST_ARCH) \
-	  $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT)) sh /apps/smoke.sh
+	  -e EXPECT_ARCH=$(ARCH) \
+	  $(LOCAL_IMAGE):$(ARCH_TAG) sh /apps/smoke.sh
 
 # Mirror every tag to $(REGISTRY). Depends on test, so a smoke-test failure
 # blocks the publish and a broken image cannot reach the registry this way.
