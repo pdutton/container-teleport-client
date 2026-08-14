@@ -204,17 +204,22 @@ TAG_SET_SH = case "$$version" in \
 
 help:
 	@echo "Targets:"
-	@echo "  build   Build both variants of $(LOCAL_IMAGE) and apply the full tag set"
-	@echo "  test    Smoke-test both variants (builds first)"
-	@echo "  push    Publish every tag to $(REGISTRY)/$(IMAGE) (builds and tests first)"
-	@echo "  clean   Remove every tag this repo applies"
+	@echo "  build   Build both variants for both architectures and assemble the manifest lists"
+	@echo "  test    Smoke-test all four images (builds first)"
+	@echo "  push    Publish the four arch tags and the ten lists to $(REGISTRY)/$(IMAGE) (builds and tests first)"
+	@echo "  clean   Remove every tag and manifest list this repo applies"
 	@echo
 	@echo "Variants (one Containerfile, gated on the INCLUDE_TCTL build arg):"
 	@echo "  tsh     tsh alone     -> latest, 18, 18.10, $(TELEPORT_VERSION), tsh"
 	@echo "  admin   tsh and tctl  -> tctl, admin, 18-admin, 18.10-admin, $(TELEPORT_VERSION)-admin"
 	@echo
-	@echo "Each target does both variants. Add VARIANT=tsh or VARIANT=admin to the"
-	@echo "matching -variant target (build-variant, tag-variant, ...) to do just one."
+	@echo "Architectures: amd64, arm64. Those ten names are manifest lists over"
+	@echo "both; the images themselves also carry latest-<arch> and admin-<arch>."
+	@echo "This host is $(HOST_ARCH); the other is built under emulation."
+	@echo
+	@echo "Each target does everything. Narrow with ARCH= on the -arch targets"
+	@echo "(build-arch, test-arch, push-arch), or with both VARIANT= and ARCH= on"
+	@echo "the -image targets (build-image, test-image, push-image)."
 	@echo
 	@echo "Pinned Teleport version: $(TELEPORT_VERSION)"
 	@echo "Bumping it means editing the Makefile, the two per-arch digests and"
@@ -368,35 +373,65 @@ test-image:
 	  -e EXPECT_ARCH=$(ARCH) \
 	  $(LOCAL_IMAGE):$(ARCH_TAG) sh /apps/smoke.sh
 
-# Mirror every tag to $(REGISTRY). Depends on test, so a smoke-test failure
-# blocks the publish and a broken image cannot reach the registry this way.
+# Mirror the four architecture images and then the ten lists to $(REGISTRY).
+# Depends on test, so a smoke-test failure blocks the publish.
 #
-# The version is read back off the label `tag-variant` applied rather than by
-# running the container again -- an inspect, not a container start.
-#
-# Not atomic, in two senses now: a failure partway through the loop leaves the
-# earlier tags of that variant published and the rest stale, and a failure in
-# the admin pass leaves the tsh variant already published. The failure is loud,
-# which is the requirement, but it is not a rollback.
+# Not atomic, and now in one more sense than before: the arch images go up
+# first and the lists that reference them second, so an interruption between
+# the two leaves the lists pointing at the previous members while the arch tags
+# are already new. Re-running repairs it. This is the failure mode D15 names,
+# and it is why the workflow does not cancel in-progress runs on master.
 push: test
-	@$(MAKE) --no-print-directory push-variant VARIANT=tsh
-	@$(MAKE) --no-print-directory push-variant VARIANT=admin
+	@$(MAKE) --no-print-directory push-arch ARCH=amd64
+	@$(MAKE) --no-print-directory push-arch ARCH=arm64
+	@$(MAKE) --no-print-directory push-manifests
 
-push-variant:
+push-arch:
+	@set -eu; $(REQUIRE_ARCH_SH)
+	@$(MAKE) --no-print-directory push-image VARIANT=tsh   ARCH=$(ARCH)
+	@$(MAKE) --no-print-directory push-image VARIANT=admin ARCH=$(ARCH)
+
+# Only the base tag carries an architecture suffix (D14), so this pushes one
+# name per (variant, arch) -- four in total, not twenty.
+push-image:
+	@set -eu; $(REQUIRE_VARIANT_SH)
+	@set -eu; $(REQUIRE_ARCH_SH)
+	@echo "Pushing $(REGISTRY)/$(IMAGE):$(ARCH_TAG)"
+	$(PODMAN) push "$(LOCAL_IMAGE):$(ARCH_TAG)" "$(REGISTRY)/$(IMAGE):$(ARCH_TAG)"
+
+push-manifests:
+	@$(MAKE) --no-print-directory push-manifest-variant VARIANT=tsh   VERSION="$(VERSION)"
+	@$(MAKE) --no-print-directory push-manifest-variant VARIANT=admin VERSION="$(VERSION)"
+
+# --all pushes the member images alongside the list. In CI they are already
+# there, having been pushed by the two build jobs, and re-pushing is a no-op on
+# unchanged blobs; locally it is what makes `make push` work on its own without
+# a separate member push. Same flag both ways, so the two halves stay identical.
+#
+# VERSION is optional here and required in manifest-variant, for the same reason
+# in both: the CI manifest job has no local image to inspect, so it passes the
+# value the build job read back off the image. Locally the fallback readback is
+# free -- an inspect of the label stamp-image wrote, not a container start, and
+# of the host-architecture member so no emulation is needed just to publish.
+push-manifest-variant:
 	@set -eu; $(REQUIRE_VARIANT_SH)
 	@set -eu; \
-	version=$$($(PODMAN) image inspect \
-	  --format '{{index .Labels "org.opencontainers.image.version"}}' $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT))); \
+	version="$(VERSION)"; \
+	[ -n "$$version" ] || version="$(call READ_VERSION,$(VARIANT))"; \
+	[ -n "$$version" ] || { \
+	  echo "ERROR: push-manifest-variant found no local image to read the version off; pass VERSION=X.Y.Z" >&2; \
+	  exit 1; \
+	}; \
 	$(TAG_SET_SH); \
 	for t in $$tags; do \
-	  echo "Pushing $(REGISTRY)/$(IMAGE):$$t"; \
-	  $(PODMAN) push "$(LOCAL_IMAGE):$$t" "$(REGISTRY)/$(IMAGE):$$t"; \
+	  echo "Pushing $(REGISTRY)/$(IMAGE):$$t (manifest list)"; \
+	  $(PODMAN) manifest push --all "$(LOCAL_IMAGE):$$t" "docker://$(REGISTRY)/$(IMAGE):$$t"; \
 	done
 
 # Removes the ten lists and four arch images this repo applies, across both
 # variants. `podman push SOURCE DESTINATION` never creates a registry-qualified
 # local tag, so this localhost-anchored match still covers the complete set. It
-# does NOT reclaim the orphaned <none> layer the `tag` target's label build
+# does NOT reclaim the orphaned <none> layer the label build in `stamp-image`
 # leaves behind -- podman rmi on a tag does not cascade to the image it was
 # derived from. Run `podman image prune` for those; this target deliberately
 # does not, since a blanket prune would delete images this repo never built.
