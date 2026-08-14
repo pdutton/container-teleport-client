@@ -21,11 +21,6 @@ TELEPORT_VERSION := 18.10.4
 AWK      ?= /usr/bin/awk
 PODMAN   ?= /usr/bin/podman
 
-# The architecture of the machine running make, in podman's naming rather than
-# uname's. Task 2 makes this the default for ARCH; until then it is what the
-# smoke test is told to expect.
-HOST_ARCH := $(patsubst aarch64,arm64,$(patsubst x86_64,amd64,$(shell uname -m)))
-
 # Registry the push target publishes to. Override to retarget:
 # `make push REGISTRY=ghcr.io/pdutton`
 #
@@ -89,6 +84,51 @@ DESC_admin  := $(DESC_PREFIX) (tsh, tctl) $(DESC_SUFFIX)
 DESC_LABEL_tsh   :=
 DESC_LABEL_admin := --label 'org.opencontainers.image.description=$(DESC_admin)'
 
+# ---- architectures ----------------------------------------------------------
+# Two architectures, one Containerfile, one --platform flag between them (D13).
+#
+# The Containerfile needs no architecture knowledge from here and is not
+# modified by any of this: its `case "$(uname -m)"` reports aarch64 both under
+# the qemu-user registration this machine already has (M6) and on a native
+# arm64 runner, so the same file is correct in both halves of D15.
+#
+# Same written-out fan-out rule as the variant block: two literal lines, no
+# ARCHES list looped over in a recipe. Adding a third architecture means a row
+# here, a name in REQUIRE_ARCH_SH, a `podman manifest add` line in
+# manifest-variant, one line in each plain target, and a `case` arm plus a
+# digest ARG in the Containerfile.
+PLATFORM_amd64 := linux/amd64
+PLATFORM_arm64 := linux/arm64
+
+# The architecture of the machine running make, in podman's naming rather than
+# uname's. Task 2 makes this the default for ARCH; until then it is what the
+# smoke test is told to expect.
+HOST_ARCH := $(patsubst aarch64,arm64,$(patsubst x86_64,amd64,$(shell uname -m)))
+
+# Where each architecture's image lands locally: the variant's base tag with the
+# architecture appended, e.g. localhost/teleport-client:admin-arm64. Only the
+# base tag is suffixed -- the other four names of a variant become manifest
+# lists (D14) and never carry an architecture. `=` (recursive), not `:=`, so
+# this tracks VARIANT and ARCH set on a sub-make command line.
+ARCH_TAG = $(BASE_TAG_$(VARIANT))-$(ARCH)
+
+# Guard for the `-image` and `-arch` targets, exactly parallel to
+# REQUIRE_VARIANT_SH below and needed for the same reason: make expands an unset
+# $(PLATFORM_) to nothing rather than complaining, so without this a bare
+# `make build-image` would hand podman an empty --platform and fail somewhere
+# much less obvious.
+REQUIRE_ARCH_SH = case "$(ARCH)" in \
+                    amd64|arm64) ;; \
+                    *) echo "ERROR: this target needs ARCH=amd64 or ARCH=arm64 (got '$(ARCH)'). Run the plain target -- build, test, push -- which does both." >&2; exit 1 ;; \
+                  esac
+
+# $(call READ_VERSION,<variant>) -- the version stamp-image wrote onto that
+# variant's image, read back with an inspect rather than a container start.
+# Reads the host-architecture member specifically: any member would do (the
+# smoke test pins every one of them to TELEPORT_VERSION), and the host's is the
+# one that needs no emulation just to read a label.
+READ_VERSION = $$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' $(LOCAL_IMAGE):$(BASE_TAG_$(1))-$(HOST_ARCH))
+
 # Guard for the `-variant` targets. They index the tables above by $(VARIANT),
 # and make expands an unset $(BASE_TAG_) to nothing rather than complaining, so
 # without this a bare `make tag` would run against `$(LOCAL_IMAGE):` and fail
@@ -143,7 +183,9 @@ TAG_SET_SH = case "$$version" in \
              esac
 
 .DEFAULT_GOAL := help
-.PHONY: help build build-variant tag tag-variant test test-variant push push-variant clean
+.PHONY: help build build-arch build-image stamp-image test test-arch test-image \
+        manifests manifest-variant push push-arch push-image push-manifests \
+        push-manifest-variant clean
 
 help:
 	@echo "Targets:"
@@ -164,41 +206,53 @@ help:
 	@echo "TELEPORT_VERSION in the Containerfile, and README.md."
 
 build:
-	@$(MAKE) --no-print-directory build-variant VARIANT=tsh
-	@$(MAKE) --no-print-directory build-variant VARIANT=admin
+	@$(MAKE) --no-print-directory build-arch ARCH=amd64
+	@$(MAKE) --no-print-directory build-arch ARCH=arm64
+	@$(MAKE) --no-print-directory manifests
 
-build-variant:
+# One architecture, both variants -- the unit of work a single CI runner does.
+build-arch:
+	@set -eu; $(REQUIRE_ARCH_SH)
+	@$(MAKE) --no-print-directory build-image VARIANT=tsh   ARCH=$(ARCH)
+	@$(MAKE) --no-print-directory build-image VARIANT=admin ARCH=$(ARCH)
+
+build-image:
 	@set -eu; $(REQUIRE_VARIANT_SH)
-	$(PODMAN) build -t $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT)) \
+	@set -eu; $(REQUIRE_ARCH_SH)
+	$(PODMAN) build --platform $(PLATFORM_$(ARCH)) -t $(LOCAL_IMAGE):$(ARCH_TAG) \
 	  --build-arg INCLUDE_TCTL=$(INCLUDE_TCTL_$(VARIANT)) \
 	  $(DESC_LABEL_$(VARIANT)) \
 	  --label org.opencontainers.image.created=$(BUILD_DATE) \
 	  --label org.opencontainers.image.revision=$(GIT_REV) \
 	  $(PODMAN_BUILD_FLAGS) \
 	  .
-	@$(MAKE) --no-print-directory tag-variant VARIANT=$(VARIANT)
+	@$(MAKE) --no-print-directory stamp-image VARIANT=$(VARIANT) ARCH=$(ARCH)
 
-tag:
-	@$(MAKE) --no-print-directory tag-variant VARIANT=tsh
-	@$(MAKE) --no-print-directory tag-variant VARIANT=admin
-
-# Read the version out of the freshly built image, stamp it on as a label, and
-# apply that variant's full tag set, so no tag can drift from what is actually
+# Read the version out of the freshly built image and stamp it on as a label, so
+# the tag set derived from it later cannot drift from what is actually
 # installed. `tsh version` prints "Teleport v18.10.4 git:... go1.25.11" on its
 # first line; field 2 is the version and the leading v is stripped. tsh is read
-# rather than tctl because it is the one binary both variants have. The X.Y.Z
-# shape check lives in TAG_SET_SH and runs before any tag is applied.
-tag-variant:
+# rather than tctl because it is the one binary both variants have.
+#
+# Applying tags is no longer this target's job: from D14 the five names a
+# variant carries are manifest lists, created by manifest-variant, and the only
+# plain tag an image has is the arch-suffixed one it was built under.
+#
+# --platform is passed to the label build as well as the first one. It is not
+# decoration: podman would otherwise re-resolve `FROM localhost/...:admin-arm64`
+# to the host architecture and silently replace an arm64 image with an amd64 one
+# under the arm64 tag. PODMAN_BUILD_FLAGS is deliberately still not threaded
+# through here -- it exists for `--pull` against the base images, which this
+# build does not fetch.
+stamp-image:
 	@set -eu; $(REQUIRE_VARIANT_SH)
+	@set -eu; $(REQUIRE_ARCH_SH)
 	@set -eu; \
-	base="$(BASE_TAG_$(VARIANT))"; \
-	version=$$($(PODMAN) run --rm $(LOCAL_IMAGE):$$base tsh version | $(AWK) 'NR==1{print $$2}'); \
+	version=$$($(PODMAN) run --rm --platform $(PLATFORM_$(ARCH)) $(LOCAL_IMAGE):$(ARCH_TAG) tsh version | $(AWK) 'NR==1{print $$2}'); \
 	version=$${version#v}; \
-	$(TAG_SET_SH); \
-	printf 'FROM %s:%s\nLABEL org.opencontainers.image.version="%s"\n' "$(LOCAL_IMAGE)" "$$base" "$$version" \
-	  | $(PODMAN) build -f - -t "$(LOCAL_IMAGE):$$base" .; \
-	for t in $$tags; do $(PODMAN) tag "$(LOCAL_IMAGE):$$base" "$(LOCAL_IMAGE):$$t"; done; \
-	echo "Tagged $(LOCAL_IMAGE) ($(VARIANT)): $$tags"
+	printf 'FROM %s:%s\nLABEL org.opencontainers.image.version="%s"\n' "$(LOCAL_IMAGE)" "$(ARCH_TAG)" "$$version" \
+	  | $(PODMAN) build --platform $(PLATFORM_$(ARCH)) -f - -t "$(LOCAL_IMAGE):$(ARCH_TAG)" .; \
+	echo "Stamped $(LOCAL_IMAGE):$(ARCH_TAG) with version $$version"
 
 # Three checks beyond the offline smoke test, all against things the smoke
 # test itself cannot see (it runs inside the image; README.md and labels are
