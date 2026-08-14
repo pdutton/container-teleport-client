@@ -30,7 +30,8 @@ enrollment); this image only replaces the client install.
 
 ## Measured facts
 
-All measured on 2026-08-12 on this machine, `podman 5.8.1` on WSL2.
+M1–M5 measured on 2026-08-12 on this machine, `podman 5.8.1` on WSL2. M6 was
+added later and carries its own date.
 
 ### M1. The Ubuntu base ships no CA store and no download tool
 
@@ -193,6 +194,37 @@ must travel inside the image. See D2 and D9.
 This corrects an earlier reading of this design that took the binary to be
 AGPL-3.0 on the strength of the README's first licence link alone.
 
+### M6. Both halves of a multi-arch build are already available here
+
+Measured 2026-08-14, for D13–D15.
+
+`arm64` binaries run on this machine without any setup step, because
+`qemu-user-static` is registered in `binfmt_misc` with the `F` (fix-binary)
+flag — the flag that makes the interpreter usable inside a container that does
+not contain it:
+
+```
+$ cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+enabled
+interpreter /usr/bin/qemu-aarch64-static
+flags: F
+```
+
+So `podman build --platform linux/arm64` and `podman run` against the result
+both work locally, unaided. `podman manifest` (create/add/push) is present in
+the `podman 5.8.1` already recorded above.
+
+On the CI side, this repo is public:
+
+```
+$ gh repo view --json visibility,nameWithOwner
+{"nameWithOwner":"pdutton/container-teleport-client","visibility":"PUBLIC"}
+```
+
+which is the condition GitHub attaches to the free `ubuntu-24.04-arm` runner.
+Native `arm64` CI therefore costs nothing here, and neither half of D15 needs a
+paid resource or a setup action.
+
 ---
 
 ## Decisions
@@ -310,6 +342,12 @@ The README copy is no longer an exception: `make test` greps `README.md` for
 now checked against each other. It is still a plain text search, not a version
 parse — it confirms the number appears somewhere in the prose, not that every
 sentence mentioning it is accurate.
+
+**Extended by D15 (2026-08-14):** the grep is its own target, `check-readme`,
+and hangs off `test-arch` rather than sitting inside `test`. CI enters at
+`test-arch` on both of its paths and never runs `test`, so a check reachable
+only from `test` would have been enforced nowhere. `make test` still reaches it —
+twice, once per architecture, which costs one extra grep.
 
 ### D5. Contents: `tsh`, its licence, and a cert store — nothing else
 
@@ -459,6 +497,11 @@ image so they cannot drift from what is installed:
 **Extended by D12 (2026-08-13):** ten tags now, across two variants. The
 readback mechanism is unchanged, and these four still name the `tsh`-only image.
 
+**Extended by D13–D14 (2026-08-14):** these ten names now label *manifest
+lists* rather than images, and four arch-suffixed image tags sit beside them.
+The count of names a user is meant to pull is unchanged, and the readback
+mechanism survives again.
+
 There is no `ubuntu` tag. With a single image it would be a permanent alias of
 `latest` — a second name meaning exactly the same thing, to be kept in sync for
 no benefit. The base OS is a README fact. (`container-ansible` publishes an
@@ -585,12 +628,21 @@ is written once (by `tag-variant` and `push-variant` since D12, switching on
 a failing smoke test blocks the publish; and a `clean` scoped to this repo's own
 tags.
 
+**Extended by D13–D14 (2026-08-14):** `tag` and `tag-variant` are gone, and so is
+`push-variant`. The ten names label manifest lists now, so `TAG_SET_SH` is
+expanded by `manifest-variant` and `push-manifest-variant` instead — still one
+definition, still switching on `$(VARIANT)`, and the readback still feeds it.
+
 `.github/workflows/build.yml` mirrors the siblings without the matrix: build and
 smoke-test on pull requests, publish only from `master` (a `workflow_dispatch`
 against another branch still builds and tests but publishes nothing), and a
 separate `dockerhub-description` job — `needs: build`, master-only, pinned to a
 commit SHA because it is a third-party action handling a write-scoped token —
 that syncs `DOCKERHUB-OVERVIEW.md` to the Hub page.
+
+**Extended by D15 (2026-08-14):** `build` does gain a matrix after all, over
+architecture rather than variant, and a third job (`manifest`) lands between
+`build` and `dockerhub-description`.
 
 ### D12. `tctl` ships in a second variant, gated on one build arg
 
@@ -665,14 +717,151 @@ written copies rather than one string against itself.
 layer podman's cache would otherwise reuse — so the build job's `timeout-minutes`
 went from 20 to 30.
 
+### D13. `amd64` and `arm64`, published as manifest lists; the `Containerfile` does not change
+
+**Added 2026-08-14.** This retires the "No multi-arch manifest" entry from Out
+of scope and extends D9 and D11; both are annotated in place rather than
+rewritten.
+
+The build has always resolved the architecture correctly — D2's downloader
+stage maps `uname -m` to the download, and D6 pins a digest per architecture —
+so an `arm64` build has produced a correct `arm64` image since day one. What was
+missing was only the publishing half: nothing built the second architecture, and
+nothing assembled a manifest list, so a puller on `arm64` got the `amd64` image
+under `latest` and no error until the binary failed to execute.
+
+**The `Containerfile` is untouched by this decision.** Under
+`podman build --platform linux/arm64` the emulated container reports `aarch64`,
+and on a native `arm64` runner it reports `aarch64` too, so the existing `case`
+is correct in both halves of D15 without a line changed. That keeps the
+`uname -m` idiom shared with `container-terraform` intact and leaves D6's
+per-architecture digest pin reading exactly as written.
+
+**Why not `FROM --platform=$BUILDPLATFORM` plus `ARG TARGETARCH`.** It would run
+the 217 MB download and extraction natively instead of emulated, which is the
+expensive part of a local `arm64` build. But it forces the architecture
+detection away from `uname -m` — `uname` would then report the *build* host and
+select the wrong tarball — which breaks the family idiom and rewrites the load-
+bearing half of D2 and D6 for a speed-up that is worth nothing in CI, where
+D15 makes both architectures native anyway. Rejected: the cost lands on the one
+place (a local build) where waiting is cheapest.
+
+**Architecture is asserted, not assumed.** `test/smoke.sh` gains `EXPECT_ARCH`,
+validated against exactly `amd64|arm64` for the same reason `EXPECT_TCTL` is
+validated against exactly `yes|no` (D12) — a value that fell through to the
+wrong branch would turn the assertion into a pass. It checks `uname -m` inside
+the running image. This is the assertion that catches a `--platform` dropped
+from one of the two `podman build` invocations, which would otherwise publish an
+`amd64` image under an `arm64` name and satisfy every check that already exists.
+The label-stamping build in the tagging pass is the likely place for that to
+happen: it currently bypasses `PODMAN_BUILD_FLAGS` entirely, so it needs
+`--platform` passed to it explicitly or it re-resolves to the host.
+
+### D14. Four arch-suffixed tags are published beside the ten lists
+
+**Added 2026-08-14.** The ten names of D9/D12 become manifest lists.
+`latest-amd64`, `latest-arm64`, `admin-amd64` and `admin-arm64` are published
+alongside them as plain images — one per variant per architecture, on the base
+tag only, not on all five names.
+
+This is a consequence of D15 rather than a goal. With each architecture built on
+its own runner, the two images have to meet somewhere before a list can
+reference them, and the registry is the only place they both exist.
+
+**Why not keep the surface at exactly ten.** The alternative is to push each
+member to a throwaway tag, record its digest, assemble the lists from digests,
+and delete the staging tags through the Docker Hub API afterwards — which is how
+`buildx` leaves members untagged. It costs a delete-scoped token, digests
+crossing job boundaries as job outputs, and orphaned tags whenever a run is
+cancelled. Shipping four honest names instead buys a debugging affordance —
+`podman pull …:latest-arm64` fetches one architecture deliberately, which is
+exactly what someone diagnosing a bad member wants — and costs one row in the
+`DOCKERHUB-OVERVIEW.md` tag table.
+
+The four names are documented as an implementation detail people *may* pull, not
+as the supported interface. The ten lists remain what the README tells anyone to
+use; pulling `latest` resolves to the right architecture automatically, which is
+the entire point of the change.
+
+### D15. Emulation locally, native runners in CI — one parameterised path, not two
+
+**Added 2026-08-14.** A local `make build` produces both architectures on one
+machine through the QEMU registration measured in M6. CI builds each
+architecture on a runner of that architecture: `ubuntu-latest` and the free
+`ubuntu-24.04-arm` that M6 confirms this repo qualifies for.
+
+The obvious risk in having two mechanisms is that they drift, and the answer is
+that there is only one mechanism with an input. The Makefile gains `ARCH`
+alongside `VARIANT` as a second fan-out dimension, in the same written-out style
+D12 chose for variants and for the same reasons — `make -n` stays readable and a
+`for` loop in a recipe cannot swallow a non-zero exit. The `-arch` targets take
+`ARCH` alone and cover both variants — the unit of work one CI runner does — and
+under them sit `-image` targets taking both `VARIANT` and `ARCH`, which are where
+the single-image `podman` work actually happens; a plain target fans out to the
+first, and an `-arch` target to the second. Both levels are guarded by a
+`REQUIRE_ARCH_SH` mirroring `REQUIRE_VARIANT_SH` (make expands an unset
+`$(PLATFORM_)` to nothing and fails somewhere much less obvious). `podman build
+--platform` is passed identically in
+both halves; on a native runner it is simply a no-op assertion of what the host
+already is. What differs between local and CI is only *which* of the four
+`(variant, arch)` pairs a given invocation runs — the fan-out, not the recipe.
+
+Two things genuinely cannot be identical, and both are parameters rather than
+branches:
+
+**Where the list finds its members.** `manifest-variant` takes `MANIFEST_SRC`,
+defaulting to `$(LOCAL_IMAGE)` so a local build assembles from local images, and
+set to the registry reference in CI where the members were pushed by two
+different runners. Same target, same `TAG_SET_SH`, one input.
+
+**Where the version comes from.** `TAG_SET_SH` needs `$version`, and the CI
+`manifest` job has no local image to read it out of. It takes `VERSION` as a
+required input: locally the fan-out reads it back off the freshly built member
+for free, and in CI it arrives as a job output that the build job emitted after
+performing exactly the same readback. No hand-typed version enters the tag
+derivation in either half, which is what D9's readback rule actually protects.
+
+A cross-architecture version disagreement cannot slip through unnoticed and does
+not need its own check: `test-arch` already asserts each image's `tsh version`
+equals `$(TELEPORT_VERSION)` (D4) on both architectures, and `push` depends on
+`test`, so the two members are transitively pinned to the same string.
+
+**Failure mode worth naming.** The publish is no longer a single step: arch tags
+are pushed by the build jobs, and the lists are pushed by a later job. A run
+cancelled between them leaves the four arch tags updated while the ten lists
+still point at the previous members. D11's existing
+`cancel-in-progress: false` on `master` is what keeps this rare, and re-running
+the workflow repairs it. It is a recoverable inconsistency, not a reason to
+ship the artifact-shuffling alternative.
+
+**CI cost.** Four builds per run instead of two, but across two runners in
+parallel, so wall-clock per job is unchanged from D12's measurement and the
+30-minute `timeout-minutes` still holds. Pull requests now get full `arm64`
+coverage, natively, which they did not have before.
+
+**Scope.** This repo only. `container-ansible` and `container-terraform` both
+list multi-arch under "Planned" and neither has a pattern to copy — this becomes
+the family's reference implementation, but porting it is separate work in
+separate repos.
+
 ---
 
 ## Out of scope
 
 - **No development or prerelease channel.** One pinned version.
-- **No multi-arch manifest.** The build maps `uname -m` to the right download, so
-  it is correct on whatever host runs it, but only a single-arch image is
-  published. Listed under "Planned" in the README, as in the siblings.
+- **No architecture beyond `amd64` and `arm64`.** Multi-arch manifests were on
+  this list until D13–D15 (2026-08-14) published them; the README's "Planned"
+  bullet went with them. Teleport does publish two more Linux tarballs —
+  `linux-arm` (32-bit) and `linux-386` both answered 200 on `cdn.teleport.dev`
+  on 2026-08-14, `linux-riscv64` 404s — but neither is a plausible target for a
+  desktop client used to hold open a VNC tunnel (D8), and each would need a
+  hand-verified digest pin (D6) maintained across every version bump. Adding one
+  later is mechanical: a `case` arm and a digest `ARG` in the `Containerfile`, a
+  row in the arch block, a name in `REQUIRE_ARCH_SH`, a `podman manifest add`
+  line in `manifest-variant` and one line in each plain target in the Makefile,
+  both of `test/smoke.sh`'s architecture `case` statements (the `EXPECT_ARCH`
+  validation and the `uname -m` map, which reject an unrecognised value on
+  purpose), and a runner or emulator that can build it.
 - **No server binary, no VNC client** (D5, D8). `tctl` was on this list until
   D12 moved it into the `admin` variant; the server binary and VNC client stay
   out of both.

@@ -29,6 +29,16 @@ PODMAN   ?= /usr/bin/podman
 # the wrong account and the push 401s on its first tag.
 REGISTRY ?= docker.io/pdutton
 
+# Where manifest-variant looks for the images a list will reference. Locally
+# they are in local storage, which is the default. In CI each architecture is
+# built and pushed by a different runner, so the members exist only in the
+# registry and the manifest job passes MANIFEST_SRC=$(REGISTRY)/$(IMAGE).
+#
+# This is one of exactly two things that differ between a local build and a CI
+# build (the other is where VERSION comes from), and it is a parameter rather
+# than a branch on purpose: same target, same TAG_SET_SH, one input (D15).
+MANIFEST_SRC ?= $(LOCAL_IMAGE)
+
 # Every local image reference goes through this, never a bare $(IMAGE). A bare
 # short name can resolve to a non-localhost repo when that is the only match, so
 # an unqualified reference on the highest-stakes line in this file -- the push
@@ -45,21 +55,24 @@ LOCAL_IMAGE = localhost/$(IMAGE)
 #          `-admin` suffix.
 #
 # Every per-variant *setting* is a row in this block, looked up from the recipes
-# as $(<SETTING>_$(VARIANT)). The plain targets (build, tag, test, push) each
-# re-invoke make once per variant; the `-variant` targets they call are the ones
-# that do the work and require VARIANT to be set.
+# as $(<SETTING>_$(VARIANT)). The plain targets (build, test, push) each
+# re-invoke make once per architecture, calling their `-arch` target twice; it
+# is the `-arch` targets that re-invoke once per variant, calling the
+# `-image` targets that do the actual work and require both VARIANT and ARCH
+# to be set.
 #
 # Adding a third variant means adding a row to each table here, a branch to
-# TAG_SET_SH, a name to REQUIRE_VARIANT_SH, and one line to each plain target --
-# but no new recipe. The fan-out is written out rather than looped over a
-# VARIANTS list on purpose: two literal lines survive `make -n` legibly and
-# cannot swallow a non-zero exit the way a `for` loop in a recipe can.
+# TAG_SET_SH, a name to REQUIRE_VARIANT_SH, and one line to each `-arch`
+# target -- but no new recipe. The fan-out is written out rather than looped
+# over a VARIANTS list on purpose: two literal lines survive `make -n`
+# legibly and cannot swallow a non-zero exit the way a `for` loop in a
+# recipe can.
 INCLUDE_TCTL_tsh   := false
 INCLUDE_TCTL_admin := true
 
 # The tag each variant's build writes first; every later step reads the image
-# back from it. Both are members of their own variant's tag set, so the
-# base-to-base retag in `tag-variant` is a harmless no-op.
+# back from it, and the architecture block below suffixes it with -$(ARCH) for
+# the tag an actual build lands under.
 BASE_TAG_tsh   := latest
 BASE_TAG_admin := admin
 
@@ -84,13 +97,70 @@ DESC_admin  := $(DESC_PREFIX) (tsh, tctl) $(DESC_SUFFIX)
 DESC_LABEL_tsh   :=
 DESC_LABEL_admin := --label 'org.opencontainers.image.description=$(DESC_admin)'
 
-# Guard for the `-variant` targets. They index the tables above by $(VARIANT),
-# and make expands an unset $(BASE_TAG_) to nothing rather than complaining, so
-# without this a bare `make tag` would run against `$(LOCAL_IMAGE):` and fail
-# somewhere much less obvious.
+# ---- architectures ----------------------------------------------------------
+# Two architectures, one Containerfile, one --platform flag between them (D13).
+#
+# The Containerfile needs no architecture knowledge from here and is not
+# modified by any of this: its `case "$(uname -m)"` reports aarch64 both under
+# the qemu-user registration this machine already has (M6) and on a native
+# arm64 runner, so the same file is correct in both halves of D15.
+#
+# Same written-out fan-out rule as the variant block: two literal lines, no
+# ARCHES list looped over in a recipe. Adding a third architecture means, in
+# this file, a row here, a name in REQUIRE_ARCH_SH, a `podman manifest add` line
+# in manifest-variant and one line in each plain target -- and outside it, a
+# `case` arm plus a digest ARG in the Containerfile, both of test/smoke.sh's
+# architecture `case` statements (the EXPECT_ARCH validation and the `uname -m`
+# map, which reject an unrecognised value on purpose), and a matrix entry in
+# .github/workflows/build.yml naming a runner that can build it.
+
+# The architecture of the machine running make, in podman's naming rather than
+# uname's. Three consumers: READ_VERSION below, which reads a version label back
+# off the host-architecture member of a variant -- the one member that needs no
+# emulation just to read a label, unlike the arch-suffixed builds, stamps and
+# smoke tests this block also defines, which run under emulation for the
+# non-host architecture on purpose -- `help`, which names it so the reader
+# knows which of the two they get natively -- and the `manifests` recipe's error
+# message, which names the image it failed to inspect.
+HOST_ARCH := $(patsubst aarch64,arm64,$(patsubst x86_64,amd64,$(shell uname -m)))
+
+PLATFORM_amd64 := linux/amd64
+PLATFORM_arm64 := linux/arm64
+
+# Where each architecture's image lands locally: the variant's base tag with the
+# architecture appended, e.g. localhost/teleport-client:admin-arm64. Only the
+# base tag is suffixed -- the other four names of a variant become manifest
+# lists (D14) and never carry an architecture. `=` (recursive), not `:=`, so
+# this tracks VARIANT and ARCH set on a sub-make command line.
+ARCH_TAG = $(BASE_TAG_$(VARIANT))-$(ARCH)
+
+# Guard for the `-image` and `-arch` targets, exactly parallel to
+# REQUIRE_VARIANT_SH below and needed for the same reason: make expands an unset
+# $(PLATFORM_) to nothing rather than complaining, so without this a bare
+# `make build-image` would hand podman an empty --platform and fail somewhere
+# much less obvious.
+REQUIRE_ARCH_SH = case "$(ARCH)" in \
+                    amd64|arm64) ;; \
+                    *) echo "ERROR: this target needs ARCH=amd64 or ARCH=arm64 (got '$(ARCH)'). Run the plain target -- build, test, push -- which does both." >&2; exit 1 ;; \
+                  esac
+
+# $(call READ_VERSION,<variant>) -- the version stamp-image wrote onto that
+# variant's image, read back with an inspect rather than a container start.
+# Reads the host-architecture member specifically: any member would do (the
+# smoke test pins every one of them to TELEPORT_VERSION), and the host's is the
+# one that needs no emulation just to read a label.
+READ_VERSION = $$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' $(LOCAL_IMAGE):$(BASE_TAG_$(1))-$(HOST_ARCH))
+
+# Guard for the `-image` targets (build-image, stamp-image, test-image,
+# push-image) and the two per-variant manifest targets (manifest-variant,
+# push-manifest-variant), exactly parallel to REQUIRE_ARCH_SH above and needed
+# for the same reason: they index the variant tables by $(VARIANT), and make
+# expands an unset $(BASE_TAG_) to nothing rather than complaining, so without
+# this a bare `make build-image ARCH=amd64` would build under
+# `$(LOCAL_IMAGE):-amd64` and fail somewhere much less obvious.
 REQUIRE_VARIANT_SH = case "$(VARIANT)" in \
                        tsh|admin) ;; \
-                       *) echo "ERROR: this target needs VARIANT=tsh or VARIANT=admin (got '$(VARIANT)'). Run the plain target -- build, tag, test, push -- which does both." >&2; exit 1 ;; \
+                       *) echo "ERROR: this target needs VARIANT=tsh or VARIANT=admin (got '$(VARIANT)'). Run the plain target -- build, test, push -- which does both." >&2; exit 1 ;; \
                      esac
 
 # Extra flags for the build, empty by default. The version is pinned and the
@@ -106,8 +176,8 @@ GIT_REV    := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 
 # Shell snippet, expanded inside a recipe. Given $version already set by the
 # recipe and VARIANT set by make, it sets $tags to that variant's full tag list.
-# Both `tag-variant` and `push-variant` expand it, so the tag scheme is defined
-# in exactly one place.
+# manifest-variant and push-manifest-variant both expand it, and nothing else
+# does, so the tag scheme stays defined in exactly one place.
 #
 # Written as one logical line: backslash continuations in a variable assignment
 # collapse to spaces, so expanding this inside a recipe cannot introduce a
@@ -138,62 +208,142 @@ TAG_SET_SH = case "$$version" in \
              esac
 
 .DEFAULT_GOAL := help
-.PHONY: help build build-variant tag tag-variant test test-variant push push-variant clean
+.PHONY: help build build-arch build-image stamp-image check-readme test \
+        test-arch test-image manifests manifest-variant push push-arch \
+        push-image push-manifests push-manifest-variant clean
 
 help:
 	@echo "Targets:"
-	@echo "  build   Build both variants of $(LOCAL_IMAGE) and apply the full tag set"
-	@echo "  test    Smoke-test both variants (builds first)"
-	@echo "  push    Publish every tag to $(REGISTRY)/$(IMAGE) (builds and tests first)"
-	@echo "  clean   Remove every tag this repo applies"
+	@echo "  build   Build both variants for both architectures and assemble the manifest lists"
+	@echo "  test    Smoke-test all four images (builds first)"
+	@echo "  push    Publish the four arch tags and the ten lists to $(REGISTRY)/$(IMAGE) (builds and tests first)"
+	@echo "  clean   Remove every tag and manifest list this repo applies"
 	@echo
 	@echo "Variants (one Containerfile, gated on the INCLUDE_TCTL build arg):"
 	@echo "  tsh     tsh alone     -> latest, 18, 18.10, $(TELEPORT_VERSION), tsh"
 	@echo "  admin   tsh and tctl  -> tctl, admin, 18-admin, 18.10-admin, $(TELEPORT_VERSION)-admin"
 	@echo
-	@echo "Each target does both variants. Add VARIANT=tsh or VARIANT=admin to the"
-	@echo "matching -variant target (build-variant, tag-variant, ...) to do just one."
+	@echo "Architectures: amd64, arm64. Those ten names are manifest lists over"
+	@echo "both; the images themselves also carry latest-<arch> and admin-<arch>."
+	@echo "This host is $(HOST_ARCH); the other is built under emulation."
+	@echo
+	@echo "Each target does everything. Narrow with ARCH= on the -arch targets"
+	@echo "(build-arch, test-arch, push-arch), or with both VARIANT= and ARCH= on"
+	@echo "the -image targets (build-image, test-image, push-image)."
 	@echo
 	@echo "Pinned Teleport version: $(TELEPORT_VERSION)"
 	@echo "Bumping it means editing the Makefile, the two per-arch digests and"
 	@echo "TELEPORT_VERSION in the Containerfile, and README.md."
 
 build:
-	@$(MAKE) --no-print-directory build-variant VARIANT=tsh
-	@$(MAKE) --no-print-directory build-variant VARIANT=admin
+	@$(MAKE) --no-print-directory build-arch ARCH=amd64
+	@$(MAKE) --no-print-directory build-arch ARCH=arm64
+	@$(MAKE) --no-print-directory manifests
 
-build-variant:
+# One architecture, both variants -- the unit of work a single CI runner does.
+build-arch:
+	@set -eu; $(REQUIRE_ARCH_SH)
+	@$(MAKE) --no-print-directory build-image VARIANT=tsh   ARCH=$(ARCH)
+	@$(MAKE) --no-print-directory build-image VARIANT=admin ARCH=$(ARCH)
+
+build-image:
 	@set -eu; $(REQUIRE_VARIANT_SH)
-	$(PODMAN) build -t $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT)) \
+	@set -eu; $(REQUIRE_ARCH_SH)
+	$(PODMAN) build --platform $(PLATFORM_$(ARCH)) -t $(LOCAL_IMAGE):$(ARCH_TAG) \
 	  --build-arg INCLUDE_TCTL=$(INCLUDE_TCTL_$(VARIANT)) \
 	  $(DESC_LABEL_$(VARIANT)) \
 	  --label org.opencontainers.image.created=$(BUILD_DATE) \
 	  --label org.opencontainers.image.revision=$(GIT_REV) \
 	  $(PODMAN_BUILD_FLAGS) \
 	  .
-	@$(MAKE) --no-print-directory tag-variant VARIANT=$(VARIANT)
+	@$(MAKE) --no-print-directory stamp-image VARIANT=$(VARIANT) ARCH=$(ARCH)
 
-tag:
-	@$(MAKE) --no-print-directory tag-variant VARIANT=tsh
-	@$(MAKE) --no-print-directory tag-variant VARIANT=admin
-
-# Read the version out of the freshly built image, stamp it on as a label, and
-# apply that variant's full tag set, so no tag can drift from what is actually
+# Read the version out of the freshly built image and stamp it on as a label, so
+# the tag set derived from it later cannot drift from what is actually
 # installed. `tsh version` prints "Teleport v18.10.4 git:... go1.25.11" on its
 # first line; field 2 is the version and the leading v is stripped. tsh is read
-# rather than tctl because it is the one binary both variants have. The X.Y.Z
-# shape check lives in TAG_SET_SH and runs before any tag is applied.
-tag-variant:
+# rather than tctl because it is the one binary both variants have.
+#
+# Applying tags is no longer this target's job: from D14 the five names a
+# variant carries are manifest lists, created by manifest-variant, and the only
+# plain tag an image has is the arch-suffixed one it was built under.
+#
+# --platform is passed to the label build as well as the first one. It is not
+# decoration: podman would otherwise re-resolve `FROM localhost/...:admin-arm64`
+# to the host architecture and silently replace an arm64 image with an amd64 one
+# under the arm64 tag. PODMAN_BUILD_FLAGS is deliberately still not threaded
+# through here -- it exists for `--pull` against the base images, which this
+# build does not fetch.
+stamp-image:
+	@set -eu; $(REQUIRE_VARIANT_SH)
+	@set -eu; $(REQUIRE_ARCH_SH)
+	@set -eu; \
+	version=$$($(PODMAN) run --rm --platform $(PLATFORM_$(ARCH)) $(LOCAL_IMAGE):$(ARCH_TAG) tsh version | $(AWK) 'NR==1{print $$2}'); \
+	version=$${version#v}; \
+	printf 'FROM %s:%s\nLABEL org.opencontainers.image.version="%s"\n' "$(LOCAL_IMAGE)" "$(ARCH_TAG)" "$$version" \
+	  | $(PODMAN) build --platform $(PLATFORM_$(ARCH)) -f - -t "$(LOCAL_IMAGE):$(ARCH_TAG)" .; \
+	echo "Stamped $(LOCAL_IMAGE):$(ARCH_TAG) with version $$version"
+
+# The ten names the two variants carry are manifest lists over the two arch
+# images (D13/D14); this is the fan-out that builds all ten.
+#
+# VERSION is optional here and required in manifest-variant. CI passes it,
+# because its manifest job has no local image to inspect; locally the fallback
+# reads it back off the tsh variant's host-architecture member, which is free --
+# an inspect of the label stamp-image wrote, not a container start, and of the
+# host's member so no emulation is needed. One readback covers both variants for
+# the reason spelled out over manifest-variant below.
+#
+# The readback is wrapped in `if !` rather than left bare because `set -e` would
+# otherwise abort the recipe outright when there is no image to inspect, before
+# the empty-version check below can say anything useful.
+manifests:
+	@set -eu; \
+	v="$(VERSION)"; \
+	if [ -z "$$v" ]; then \
+	  if ! { v="$(call READ_VERSION,tsh)"; } 2>/dev/null; then v=""; fi; \
+	fi; \
+	[ -n "$$v" ] || { \
+	  echo "ERROR: no VERSION given, and no $(LOCAL_IMAGE):$(BASE_TAG_tsh)-$(HOST_ARCH) to read one off. Run 'make build' first, or pass VERSION=X.Y.Z." >&2; \
+	  exit 1; \
+	}; \
+	$(MAKE) --no-print-directory manifest-variant VARIANT=tsh   VERSION="$$v"; \
+	$(MAKE) --no-print-directory manifest-variant VARIANT=admin VERSION="$$v"
+
+# Both variants ship the same tsh out of the same tarball, so one version covers
+# both lists -- the same reason TAG_SET_SH has only ever taken a single $version
+# and tag derivation reads tsh rather than tctl.
+#
+# VERSION is required here rather than read back, unlike in manifests above: the
+# CI manifest job has no local image to inspect and receives it as a job output
+# from the build job, which read it back off the image exactly as manifests
+# does. Either way no hand-typed version reaches the tag derivation, which is
+# what D9's readback rule protects.
+#
+# A name may already exist as a plain image from a build that predates this
+# scheme, or as a list from a previous run. Both are cleared first: `manifest
+# create` fails on an existing name, and the manifest check has to come first
+# because `podman image exists` is true for a list too.
+manifest-variant:
 	@set -eu; $(REQUIRE_VARIANT_SH)
 	@set -eu; \
-	base="$(BASE_TAG_$(VARIANT))"; \
-	version=$$($(PODMAN) run --rm $(LOCAL_IMAGE):$$base tsh version | $(AWK) 'NR==1{print $$2}'); \
-	version=$${version#v}; \
+	version="$(VERSION)"; \
+	[ -n "$$version" ] || { \
+	  echo "ERROR: manifest-variant needs VERSION=X.Y.Z. Run 'make manifests', which reads it back off the built image." >&2; \
+	  exit 1; \
+	}; \
 	$(TAG_SET_SH); \
-	printf 'FROM %s:%s\nLABEL org.opencontainers.image.version="%s"\n' "$(LOCAL_IMAGE)" "$$base" "$$version" \
-	  | $(PODMAN) build -f - -t "$(LOCAL_IMAGE):$$base" .; \
-	for t in $$tags; do $(PODMAN) tag "$(LOCAL_IMAGE):$$base" "$(LOCAL_IMAGE):$$t"; done; \
-	echo "Tagged $(LOCAL_IMAGE) ($(VARIANT)): $$tags"
+	for t in $$tags; do \
+	  if $(PODMAN) manifest exists "$(LOCAL_IMAGE):$$t" 2>/dev/null; then \
+	    $(PODMAN) manifest rm "$(LOCAL_IMAGE):$$t" >/dev/null; \
+	  elif $(PODMAN) image exists "$(LOCAL_IMAGE):$$t" 2>/dev/null; then \
+	    $(PODMAN) rmi -f "$(LOCAL_IMAGE):$$t" >/dev/null; \
+	  fi; \
+	  $(PODMAN) manifest create "$(LOCAL_IMAGE):$$t" >/dev/null; \
+	  $(PODMAN) manifest add "$(LOCAL_IMAGE):$$t" "$(MANIFEST_SRC):$(BASE_TAG_$(VARIANT))-amd64" >/dev/null; \
+	  $(PODMAN) manifest add "$(LOCAL_IMAGE):$$t" "$(MANIFEST_SRC):$(BASE_TAG_$(VARIANT))-arm64" >/dev/null; \
+	done; \
+	echo "Manifest lists for $(VARIANT) over amd64+arm64: $$tags"
 
 # Three checks beyond the offline smoke test, all against things the smoke
 # test itself cannot see (it runs inside the image; README.md and labels are
@@ -208,7 +358,24 @@ tag-variant:
 #   3. org.opencontainers.image.description contains the pinned version, i.e.
 #      the label actually interpolates TELEPORT_VERSION rather than a
 #      hand-typed string that could drift from it (D3).
-test: build
+#
+# 1 is repo-wide and hangs off test-arch as check-readme below; 2 and 3 are
+# per-image and live in test-image.
+test:
+	@$(MAKE) --no-print-directory test-arch ARCH=amd64
+	@$(MAKE) --no-print-directory test-arch ARCH=arm64
+
+# A target of its own rather than a line in `test`, because CI never runs
+# `test`: both workflow paths enter at test-arch (`make test-arch ARCH=...` on a
+# pull request, `make test-arch push-arch ARCH=...` on master) and the manifest
+# job runs neither. A check living only in `test` would therefore be enforced by
+# nothing in CI, which is the opposite of what D4 claims for this copy of the
+# pin. Hanging it off test-arch puts it on every path that tests.
+#
+# `make test` calls test-arch twice, so a full local run greps README.md twice.
+# That is one grep over one file, and cheaper than the stamp file or order-only
+# arrangement it would take to run it once.
+check-readme:
 	@grep -q '$(TELEPORT_VERSION)' README.md || { \
 	  echo "FAIL: README.md does not mention $(TELEPORT_VERSION); the version pin" >&2; \
 	  echo "      has three copies (Containerfile, Makefile, README.md) and this" >&2; \
@@ -216,64 +383,127 @@ test: build
 	  echo "      same commit as any version bump." >&2; \
 	  exit 1; \
 	}
-	@$(MAKE) --no-print-directory test-variant VARIANT=tsh
-	@$(MAKE) --no-print-directory test-variant VARIANT=admin
 
-test-variant:
+# build-arch is a prerequisite rather than something `test` depends on, so that
+# a CI runner can say `make test-arch ARCH=arm64` and get the build for free.
+# ARCH is a command-line variable in that invocation, so it reaches the
+# prerequisite too. check-readme needs no input and is listed first so that a
+# serial make reaches it before spending the build on a stale README.
+test-arch: check-readme build-arch
+	@set -eu; $(REQUIRE_ARCH_SH)
+	@$(MAKE) --no-print-directory test-image VARIANT=tsh   ARCH=$(ARCH)
+	@$(MAKE) --no-print-directory test-image VARIANT=admin ARCH=$(ARCH)
+
+test-image:
 	@set -eu; $(REQUIRE_VARIANT_SH)
+	@set -eu; $(REQUIRE_ARCH_SH)
 	@set -eu; \
 	expected="LicenseRef-Teleport-Community-Edition"; \
-	actual=$$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT))); \
+	actual=$$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' $(LOCAL_IMAGE):$(ARCH_TAG)); \
 	[ "$$actual" = "$$expected" ] || { \
-	  echo "FAIL: $(VARIANT): org.opencontainers.image.licenses label is '$$actual', expected '$$expected'" >&2; \
+	  echo "FAIL: $(VARIANT)/$(ARCH): org.opencontainers.image.licenses label is '$$actual', expected '$$expected'" >&2; \
 	  exit 1; \
 	}
 	@set -eu; \
 	expected="$(DESC_$(VARIANT))"; \
-	actual=$$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.description"}}' $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT))); \
+	actual=$$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.description"}}' $(LOCAL_IMAGE):$(ARCH_TAG)); \
 	[ "$$actual" = "$$expected" ] || { \
-	  echo "FAIL: $(VARIANT): org.opencontainers.image.description label is '$$actual', expected '$$expected'" >&2; \
+	  echo "FAIL: $(VARIANT)/$(ARCH): org.opencontainers.image.description label is '$$actual', expected '$$expected'" >&2; \
 	  echo "      (expected the pinned version $(TELEPORT_VERSION) interpolated into it)" >&2; \
 	  exit 1; \
 	}
-	$(PODMAN) run --rm -v ./test:/apps:ro,z \
+	$(PODMAN) run --rm --platform $(PLATFORM_$(ARCH)) -v ./test:/apps:ro,z \
 	  -e EXPECT_VERSION=$(TELEPORT_VERSION) \
 	  -e EXPECT_TCTL=$(EXPECT_TCTL_$(VARIANT)) \
-	  $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT)) sh /apps/smoke.sh
+	  -e EXPECT_ARCH=$(ARCH) \
+	  $(LOCAL_IMAGE):$(ARCH_TAG) sh /apps/smoke.sh
 
-# Mirror every tag to $(REGISTRY). Depends on test, so a smoke-test failure
-# blocks the publish and a broken image cannot reach the registry this way.
+# Mirror the four architecture images to $(REGISTRY), assemble the ten lists
+# from the local members, and mirror those too. Depends on test, so a
+# smoke-test failure blocks the publish.
 #
-# The version is read back off the label `tag-variant` applied rather than by
-# running the container again -- an inspect, not a container start.
+# test's prerequisite chain stops at build-arch, which builds the four images
+# and nothing else -- manifests is what assembles the lists, and only build
+# calls it. So push calls manifests itself rather than relying on test to have
+# done it; manifests is idempotent (it clears and recreates each name), so
+# this is safe even when a prior `make build` already ran it.
 #
-# Not atomic, in two senses now: a failure partway through the loop leaves the
-# earlier tags of that variant published and the rest stale, and a failure in
-# the admin pass leaves the tsh variant already published. The failure is loud,
-# which is the requirement, but it is not a rollback.
+# Not atomic, and now in one more sense than before: the arch images go up
+# first and the lists that reference them second, so an interruption between
+# the two leaves the lists pointing at the previous members while the arch tags
+# are already new. Re-running repairs it. This is the failure mode D15 names,
+# and it is why the workflow does not cancel in-progress runs on master.
 push: test
-	@$(MAKE) --no-print-directory push-variant VARIANT=tsh
-	@$(MAKE) --no-print-directory push-variant VARIANT=admin
+	@$(MAKE) --no-print-directory push-arch ARCH=amd64
+	@$(MAKE) --no-print-directory push-arch ARCH=arm64
+	@$(MAKE) --no-print-directory manifests
+	@$(MAKE) --no-print-directory push-manifests
 
-push-variant:
+push-arch:
+	@set -eu; $(REQUIRE_ARCH_SH)
+	@$(MAKE) --no-print-directory push-image VARIANT=tsh   ARCH=$(ARCH)
+	@$(MAKE) --no-print-directory push-image VARIANT=admin ARCH=$(ARCH)
+
+# Only the base tag carries an architecture suffix (D14), so this pushes one
+# name per (variant, arch) -- four in total, not twenty.
+push-image:
+	@set -eu; $(REQUIRE_VARIANT_SH)
+	@set -eu; $(REQUIRE_ARCH_SH)
+	@echo "Pushing $(REGISTRY)/$(IMAGE):$(ARCH_TAG)"
+	$(PODMAN) push "$(LOCAL_IMAGE):$(ARCH_TAG)" "$(REGISTRY)/$(IMAGE):$(ARCH_TAG)"
+
+push-manifests:
+	@$(MAKE) --no-print-directory push-manifest-variant VARIANT=tsh   VERSION="$(VERSION)"
+	@$(MAKE) --no-print-directory push-manifest-variant VARIANT=admin VERSION="$(VERSION)"
+
+# --all pushes the member images alongside the list. In CI they are already
+# there, having been pushed by the two build jobs, and re-pushing is a no-op on
+# unchanged blobs. It is not what makes `make push` work either: push mirrors
+# the four arch images itself, calling push-arch twice before it reaches
+# push-manifests. What --all buys is that `make push-manifests` stands on its
+# own -- run against a registry that has never seen the members, it uploads them
+# rather than publishing ten lists of references to nothing. Same flag both
+# ways, so the two halves stay identical.
+#
+# VERSION is optional here and required in manifest-variant, for the same reason
+# in both: the CI manifest job has no local image to inspect, so it passes the
+# value the build job read back off the image. Locally the fallback readback is
+# free -- an inspect of the label stamp-image wrote, not a container start, and
+# of the host-architecture member so no emulation is needed just to publish.
+push-manifest-variant:
 	@set -eu; $(REQUIRE_VARIANT_SH)
 	@set -eu; \
-	version=$$($(PODMAN) image inspect \
-	  --format '{{index .Labels "org.opencontainers.image.version"}}' $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT))); \
+	version="$(VERSION)"; \
+	if [ -z "$$version" ]; then \
+	  if ! { version="$(call READ_VERSION,$(VARIANT))"; } 2>/dev/null; then version=""; fi; \
+	fi; \
+	[ -n "$$version" ] || { \
+	  echo "ERROR: push-manifest-variant found no local image to read the version off; pass VERSION=X.Y.Z" >&2; \
+	  exit 1; \
+	}; \
 	$(TAG_SET_SH); \
 	for t in $$tags; do \
-	  echo "Pushing $(REGISTRY)/$(IMAGE):$$t"; \
-	  $(PODMAN) push "$(LOCAL_IMAGE):$$t" "$(REGISTRY)/$(IMAGE):$$t"; \
+	  echo "Pushing $(REGISTRY)/$(IMAGE):$$t (manifest list)"; \
+	  $(PODMAN) manifest push --all "$(LOCAL_IMAGE):$$t" "docker://$(REGISTRY)/$(IMAGE):$$t"; \
 	done
 
-# Removes the ten tags this repo applies, across both variants. `podman push SOURCE DESTINATION`
-# never creates a registry-qualified local tag, so this localhost-anchored match
-# still covers the complete set. It does NOT reclaim the orphaned <none> layer
-# the `tag` target's label build leaves behind -- podman rmi on a tag does not
-# cascade to the image it was derived from. Run `podman image prune` for those;
-# this target deliberately does not, since a blanket prune would delete images
-# this repo never built.
+# Removes the ten lists and four arch images this repo applies, across both
+# variants. `podman push SOURCE DESTINATION` never creates a registry-qualified
+# local tag, so this localhost-anchored match still covers the complete set. It
+# does NOT reclaim the orphaned <none> layer the label build in `stamp-image`
+# leaves behind -- podman rmi on a tag does not cascade to the image it was
+# derived from. Run `podman image prune` for those; this target deliberately
+# does not, since a blanket prune would delete images this repo never built.
 clean:
-	@ids=$$($(PODMAN) images --format '{{.Repository}}:{{.Tag}}' \
+	@set -eu; \
+	names=$$($(PODMAN) images --format '{{.Repository}}:{{.Tag}}' \
 	          | grep -E "^(localhost/)?$(IMAGE):" || true); \
-	if [ -n "$$ids" ]; then $(PODMAN) rmi -f $$ids; else echo "nothing to clean"; fi
+	if [ -z "$$names" ]; then echo "nothing to clean"; exit 0; fi; \
+	for n in $$names; do \
+	  if $(PODMAN) manifest exists "$$n" 2>/dev/null; then \
+	    $(PODMAN) manifest rm "$$n" >/dev/null; \
+	  else \
+	    $(PODMAN) rmi -f "$$n" >/dev/null; \
+	  fi; \
+	done; \
+	echo "Removed: $$names"

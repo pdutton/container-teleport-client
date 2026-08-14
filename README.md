@@ -247,6 +247,27 @@ now fails the build rather than silently going stale. See
 pinned rather than resolved, and `CLAUDE.md` for the mechanics of bumping it (which also means
 updating the two per-architecture digest pins in the Containerfile).
 
+## Architectures
+
+Published for `linux/amd64` and `linux/arm64`. Every one of the ten tags in the
+table above is a manifest list, so `podman pull …:latest` (or `docker pull`)
+resolves to the architecture you are on with nothing to specify.
+
+Four extra tags name a single architecture directly — `latest-amd64`,
+`latest-arm64`, `admin-amd64`, `admin-arm64`. They exist because CI builds each
+architecture on a runner of that architecture and the two images have to meet in
+the registry before a list can reference them. Pull one if you are deliberately
+testing the other architecture's image; otherwise use the plain tags.
+
+`make build` produces both architectures on one machine, emulating the foreign
+one through `binfmt_misc` (see [Building Locally](#building-locally) below). On
+Debian and Ubuntu that needs `qemu-user-static` installed; on Fedora,
+`qemu-user-static` plus `systemd-binfmt`. Check it is registered with:
+
+    cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+
+To build only your own architecture, narrow it: `make build-arch ARCH=amd64`.
+
 ## Why the Version Is Pinned Rather Than Resolved
 
 There is no usable release index for Teleport to resolve a version against at build time.
@@ -281,28 +302,32 @@ whatever trust exists in the original bytes.
 Requires [Podman](https://podman.io/) and GNU Make.
 
 ```bash
-make build      # build both variants and apply the full tag set
-make test       # build, then run the offline smoke test against each variant
-make clean      # remove this repo's ten tags
+make build      # build both variants for both architectures, assemble the ten manifest lists
+make test       # build, then run the offline smoke test against each of the four images
+make clean      # remove this repo's ten lists and four arch images
 make push       # build, test, then publish every tag (needs registry credentials)
 
-make build PODMAN_BUILD_FLAGS="--pull"   # refresh the Ubuntu and Alpine base images
-make build-variant VARIANT=admin         # just the one variant
+make build PODMAN_BUILD_FLAGS="--pull"     # refresh the Ubuntu and Alpine base images
+make build-arch ARCH=amd64                 # just the one architecture, both variants
+make build-image VARIANT=admin ARCH=arm64  # just the one image
 ```
 
-Each plain target does both variants, one after the other, by re-invoking itself with
-`VARIANT=tsh` and then `VARIANT=admin`. Add `VARIANT=` to the matching `-variant` target
-(`build-variant`, `tag-variant`, `test-variant`, `push-variant`) to work on one alone — useful
-when iterating, since a full `make build` downloads the 217 MB Teleport tarball twice.
+Each plain target does both architectures, one after the other, by re-invoking itself with
+`ARCH=amd64` and then `ARCH=arm64`; each of those in turn does both variants the same way. Narrow
+with `ARCH=` on the matching `-arch` target (`build-arch`, `test-arch`, `push-arch`) to work on one
+architecture, or with both `VARIANT=` and `ARCH=` on the `-image` target (`build-image`,
+`test-image`, `push-image`) to work on exactly one image — useful when iterating, since a full
+`make build` downloads a Teleport tarball four times (one per variant, per architecture).
 
 `push` depends on `test`, so a failing smoke test blocks the publish — a broken image cannot reach
 the registry through `make push`. Publishing needs `podman login docker.io` first, or the push
 fails on its first tag.
 
-`make clean` removes this repo's ten tags but leaves behind the untagged `<none>` layers that the
-version-label build step creates (one per variant) — `podman rmi` on a tag does not cascade to the
-image it was derived from. Clear those with `podman image prune`; `clean` does not run it
-automatically, since a blanket prune would also delete images this repo never built.
+`make clean` removes this repo's ten lists and four arch images but leaves behind the untagged
+`<none>` layers that the version-label build step creates (one per image) — `podman rmi` on a tag
+does not cascade to the image it was derived from. Clear those with `podman image prune`; `clean`
+does not run it automatically, since a blanket prune would also delete images this repo never
+built.
 
 ## Continuous Integration
 
@@ -342,10 +367,3 @@ A copy of the Community Edition licence travels inside every image at
 Both licences must be complied with when using this image. The eligibility limit stated at the top
 of this document is part of the Community Edition licence's terms, not a separate policy of this
 repo.
-
-## Planned
-
-**Multi-arch builds.** The build maps `uname -m` to the right download, so it is correct on
-whatever architecture builds it, but no multi-arch manifest is published — a build on `arm64`
-produces an `arm64` image and a build on `amd64` produces an `amd64` image, with no single tag
-that resolves to the right one automatically for a puller of a different architecture.

@@ -87,6 +87,23 @@ bare version tags point at the `tsh`-only image, so `tctl` never arrives unasked
 | `18.10-admin` | `tsh` + `tctl` | the newest build on the Teleport 18.10 line published here |
 | `18.10.4-admin` | `tsh` + `tctl` | this exact version |
 
+Every tag above is a **manifest list** covering `linux/amd64` and `linux/arm64`,
+so a plain `docker pull pdutton/teleport-client` gets the right one
+automatically.
+
+Four more tags name one architecture directly, for when you want to pull the
+other one deliberately:
+
+| Tag | Contents | Architecture |
+|---|---|---|
+| `latest-amd64` | `tsh` | `linux/amd64` |
+| `latest-arm64` | `tsh` | `linux/arm64` |
+| `admin-amd64` | `tsh` + `tctl` | `linux/amd64` |
+| `admin-arm64` | `tsh` + `tctl` | `linux/arm64` |
+
+These are the images the lists point at. Prefer the plain tags unless you have a
+specific reason not to.
+
 ## Integrity, Not Authenticity
 
 The build pins a per-architecture SHA-256 digest for the Teleport tarball it downloads, which stops a
