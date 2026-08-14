@@ -104,17 +104,20 @@ jobs:
       # The manifest job has no image to read the version off, so it comes from
       # here -- read back out of the built image exactly as a local `make
       # manifests` would, so no hand-typed version reaches the tag derivation
-      # (D9, D15). Only the amd64 leg sets it: both legs would write the same
-      # value, but matrix outputs are last-writer-wins and one deterministic
-      # writer is worth more than a redundant second.
+      # (D9, D15). Both legs run this and both read their own architecture's
+      # image, so they agree by construction: test-arch already asserted each
+      # image's `tsh version` equals TELEPORT_VERSION before this step runs.
+      # Matrix outputs are last-writer-wins, but that's harmless here --
+      # whichever leg finishes last writes the same string the other would
+      # have.
       - name: Report the built version
         id: version
-        if: matrix.arch == 'amd64' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         run: |
           v=$("$PODMAN" image inspect \
             --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
-            localhost/teleport-client:latest-amd64)
-          test -n "$v" || { echo "ERROR: no version label on latest-amd64" >&2; exit 1; }
+            localhost/teleport-client:latest-${{ matrix.arch }})
+          test -n "$v" || { echo "ERROR: no version label on latest-${{ matrix.arch }}" >&2; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Built version $v"
 
