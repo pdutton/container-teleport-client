@@ -1041,17 +1041,25 @@ are. Replace the `Build and smoke-test`, `Log in to Docker Hub` and
       # The manifest job has no image to read the version off, so it comes from
       # here -- read back out of the built image exactly as a local `make
       # manifests` would, so no hand-typed version reaches the tag derivation
-      # (D9, D15). Only the amd64 leg sets it: both legs would write the same
-      # value, but matrix outputs are last-writer-wins and one deterministic
-      # writer is worth more than a redundant second.
+      # (D9, D15).
+      #
+      # BOTH legs write it, deliberately. Matrix legs sharing an output key are
+      # last-writer-wins by completion order, and a leg that skips this step
+      # still evaluates the job-level `outputs:` expression -- to the empty
+      # string. Gating this on one architecture would therefore let the other
+      # leg overwrite a good version with nothing whenever it finished last.
+      # Having both write is what makes the race harmless: `test-arch` has
+      # already asserted each image's `tsh version` equals TELEPORT_VERSION
+      # before this runs, so the two legs write the same string by construction.
       - name: Report the built version
         id: version
-        if: matrix.arch == 'amd64' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         run: |
+          tag="localhost/teleport-client:latest-${{ matrix.arch }}"
           v=$("$PODMAN" image inspect \
             --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
-            localhost/teleport-client:latest-amd64)
-          test -n "$v" || { echo "ERROR: no version label on latest-amd64" >&2; exit 1; }
+            "$tag")
+          test -n "$v" || { echo "ERROR: no version label on $tag" >&2; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Built version $v"
 ```
@@ -1186,8 +1194,9 @@ A third job assembles the ten manifest lists. It has to: the two architectures
 are built by different runners and only meet in the registry, which is what
 MANIFEST_SRC is for. The version it needs comes from the build job as an
 output, read back off the image rather than typed, so the readback rule holds
-across the job boundary. Only the amd64 leg reports it -- both would agree, but
-matrix outputs are last-writer-wins.
+across the job boundary. Both legs report it: matrix outputs are last-writer-wins
+and a leg that skips the step still writes an empty string, so gating it on one
+architecture would let the other blank it.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
