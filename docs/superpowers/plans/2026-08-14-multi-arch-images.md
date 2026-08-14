@@ -815,6 +815,14 @@ Replace the `push` comment block and both recipes with:
 # Mirror the four architecture images and then the ten lists to $(REGISTRY).
 # Depends on test, so a smoke-test failure blocks the publish.
 #
+# `manifests` is called here and not left to `build`, because `test` does not
+# call it: `test-arch` takes `build-arch` as its prerequisite, which stops at
+# the four architecture images. Without this line `push` would try to push
+# lists nothing had created. `test` must NOT call it instead -- a
+# single-architecture CI runner has only its own arch's images and cannot
+# assemble a two-member list, which is the whole reason the split exists.
+# `manifests` clears and recreates each name, so calling it twice is safe.
+#
 # Not atomic, and now in one more sense than before: the arch images go up
 # first and the lists that reference them second, so an interruption between
 # the two leaves the lists pointing at the previous members while the arch tags
@@ -823,6 +831,7 @@ Replace the `push` comment block and both recipes with:
 push: test
 	@$(MAKE) --no-print-directory push-arch ARCH=amd64
 	@$(MAKE) --no-print-directory push-arch ARCH=arm64
+	@$(MAKE) --no-print-directory manifests
 	@$(MAKE) --no-print-directory push-manifests
 
 push-arch:
@@ -1427,11 +1436,20 @@ before the branch is offered for merge.
 
 ```bash
 make clean
+make build
 make test
 ```
 
-**Allow 25–40 minutes.** Expected: four builds, four smoke tests, each printing
-its own `architecture:` line — two `amd64`, two `arm64` — and four `PASS` lines.
+**Allow 25–45 minutes.** `make build` produces the four images and the ten
+lists; `make test` then re-enters `build-arch` (cached, fast) and runs the four
+smoke tests. Expected: four smoke tests, each printing its own `architecture:`
+line — two `amd64`, two `arm64` — and four `PASS` lines.
+
+`make test` alone is not enough here, and the reason is worth knowing: `test`
+fans out to `test-arch`, which stops at `build-arch` and the four architecture
+images. It never assembles the lists — deliberately, since a single-architecture
+CI runner could not. So a `clean` followed by `test` alone leaves four names,
+not fourteen, and Step 2 below would fail.
 
 - [ ] **Step 2: Confirm the published shape**
 
@@ -1474,13 +1492,19 @@ architecture is worth doing once.
 ```bash
 make -n push 2>&1 | grep -cE 'podman push'
 make -n push 2>&1 | grep -c 'manifest push --all'
+make -n push 2>&1 | grep -c 'manifest create'
 ```
 
-Expected: `4` and `2` — see Task 5 Step 3 for why the second is two rather than
-ten (`make -n` prints the `for` loop, it does not unroll it).
+Expected: `4`, `2`, and `10`.
 
-The count that actually matters — ten lists reaching the registry — is verified
-in Step 2 above by inspecting all ten locally, and by the merge run itself.
+The first two are `make -n` artefacts — see Task 5 Step 3 for why the second is
+two rather than ten (`make -n` prints the `for` loop, it does not unroll it).
+
+**The third is the one that matters.** `push` must assemble the lists before it
+pushes them: `test` stops at the four architecture images, so without a
+`manifests` call in `push` the pushes would target lists nothing had created,
+and the first two counts would still be `4` and `2`. A zero here means `push`
+is broken on a clean checkout even though every other check passes.
 
 - [ ] **Step 5: Review the whole diff**
 
