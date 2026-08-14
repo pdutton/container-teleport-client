@@ -29,6 +29,16 @@ PODMAN   ?= /usr/bin/podman
 # the wrong account and the push 401s on its first tag.
 REGISTRY ?= docker.io/pdutton
 
+# Where manifest-variant looks for the images a list will reference. Locally
+# they are in local storage, which is the default. In CI each architecture is
+# built and pushed by a different runner, so the members exist only in the
+# registry and the manifest job passes MANIFEST_SRC=$(REGISTRY)/$(IMAGE).
+#
+# This is one of exactly two things that differ between a local build and a CI
+# build (the other is where VERSION comes from), and it is a parameter rather
+# than a branch on purpose: same target, same TAG_SET_SH, one input (D15).
+MANIFEST_SRC ?= $(LOCAL_IMAGE)
+
 # Every local image reference goes through this, never a bare $(IMAGE). A bare
 # short name can resolve to a non-localhost repo when that is the only match, so
 # an unqualified reference on the highest-stakes line in this file -- the push
@@ -156,8 +166,8 @@ GIT_REV    := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 
 # Shell snippet, expanded inside a recipe. Given $version already set by the
 # recipe and VARIANT set by make, it sets $tags to that variant's full tag list.
-# Nothing expands it yet -- manifest-variant and push-manifest-variant will,
-# so the tag scheme stays defined in exactly one place.
+# manifest-variant expands it now; push-manifest-variant will too, so the tag
+# scheme stays defined in exactly one place.
 #
 # Written as one logical line: backslash continuations in a variable assignment
 # collapse to spaces, so expanding this inside a recipe cannot introduce a
@@ -259,6 +269,48 @@ stamp-image:
 	  | $(PODMAN) build --platform $(PLATFORM_$(ARCH)) -f - -t "$(LOCAL_IMAGE):$(ARCH_TAG)" .; \
 	echo "Stamped $(LOCAL_IMAGE):$(ARCH_TAG) with version $$version"
 
+# The five names a variant carries are manifest lists over the two arch images
+# (D13/D14). VERSION is required rather than read here: the CI manifest job has
+# no local image to inspect and receives it as a job output from the build job,
+# which read it back off the image exactly as `manifests` does below. Either
+# way no hand-typed version reaches the tag derivation, which is what D9's
+# readback rule protects.
+manifests:
+	@set -eu; \
+	v="$(VERSION)"; \
+	[ -n "$$v" ] || v="$(call READ_VERSION,tsh)"; \
+	$(MAKE) --no-print-directory manifest-variant VARIANT=tsh   VERSION="$$v"; \
+	$(MAKE) --no-print-directory manifest-variant VARIANT=admin VERSION="$$v"
+
+# Both variants ship the same tsh out of the same tarball, so one version covers
+# both lists -- the same reason TAG_SET_SH has only ever taken a single $version
+# and tag derivation reads tsh rather than tctl.
+#
+# A name may already exist as a plain image from a build that predates this
+# scheme, or as a list from a previous run. Both are cleared first: `manifest
+# create` fails on an existing name, and the manifest check has to come first
+# because `podman image exists` is true for a list too.
+manifest-variant:
+	@set -eu; $(REQUIRE_VARIANT_SH)
+	@set -eu; \
+	version="$(VERSION)"; \
+	[ -n "$$version" ] || { \
+	  echo "ERROR: manifest-variant needs VERSION=X.Y.Z. Run 'make manifests', which reads it back off the built image." >&2; \
+	  exit 1; \
+	}; \
+	$(TAG_SET_SH); \
+	for t in $$tags; do \
+	  if $(PODMAN) manifest exists "$(LOCAL_IMAGE):$$t" 2>/dev/null; then \
+	    $(PODMAN) manifest rm "$(LOCAL_IMAGE):$$t" >/dev/null; \
+	  elif $(PODMAN) image exists "$(LOCAL_IMAGE):$$t" 2>/dev/null; then \
+	    $(PODMAN) rmi -f "$(LOCAL_IMAGE):$$t" >/dev/null; \
+	  fi; \
+	  $(PODMAN) manifest create "$(LOCAL_IMAGE):$$t" >/dev/null; \
+	  $(PODMAN) manifest add "$(LOCAL_IMAGE):$$t" "$(MANIFEST_SRC):$(BASE_TAG_$(VARIANT))-amd64" >/dev/null; \
+	  $(PODMAN) manifest add "$(LOCAL_IMAGE):$$t" "$(MANIFEST_SRC):$(BASE_TAG_$(VARIANT))-arm64" >/dev/null; \
+	done; \
+	echo "Manifest lists for $(VARIANT) over amd64+arm64: $$tags"
+
 # Three checks beyond the offline smoke test, all against things the smoke
 # test itself cannot see (it runs inside the image; README.md and labels are
 # both outside it):
@@ -341,14 +393,23 @@ push-variant:
 	  $(PODMAN) push "$(LOCAL_IMAGE):$$t" "$(REGISTRY)/$(IMAGE):$$t"; \
 	done
 
-# Removes the ten tags this repo applies, across both variants. `podman push SOURCE DESTINATION`
-# never creates a registry-qualified local tag, so this localhost-anchored match
-# still covers the complete set. It does NOT reclaim the orphaned <none> layer
-# the `tag` target's label build leaves behind -- podman rmi on a tag does not
-# cascade to the image it was derived from. Run `podman image prune` for those;
-# this target deliberately does not, since a blanket prune would delete images
-# this repo never built.
+# Removes the ten lists and four arch images this repo applies, across both
+# variants. `podman push SOURCE DESTINATION` never creates a registry-qualified
+# local tag, so this localhost-anchored match still covers the complete set. It
+# does NOT reclaim the orphaned <none> layer the `tag` target's label build
+# leaves behind -- podman rmi on a tag does not cascade to the image it was
+# derived from. Run `podman image prune` for those; this target deliberately
+# does not, since a blanket prune would delete images this repo never built.
 clean:
-	@ids=$$($(PODMAN) images --format '{{.Repository}}:{{.Tag}}' \
+	@set -eu; \
+	names=$$($(PODMAN) images --format '{{.Repository}}:{{.Tag}}' \
 	          | grep -E "^(localhost/)?$(IMAGE):" || true); \
-	if [ -n "$$ids" ]; then $(PODMAN) rmi -f $$ids; else echo "nothing to clean"; fi
+	if [ -z "$$names" ]; then echo "nothing to clean"; exit 0; fi; \
+	for n in $$names; do \
+	  if $(PODMAN) manifest exists "$$n" 2>/dev/null; then \
+	    $(PODMAN) manifest rm "$$n" >/dev/null; \
+	  else \
+	    $(PODMAN) rmi -f "$$n" >/dev/null; \
+	  fi; \
+	done; \
+	echo "Removed: $$names"
