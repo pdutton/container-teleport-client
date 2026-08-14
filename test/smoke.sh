@@ -3,6 +3,7 @@ set -eu
 
 : "${EXPECT_VERSION:?EXPECT_VERSION must be set}"
 : "${EXPECT_TCTL:?EXPECT_TCTL must be set to yes or no}"
+: "${EXPECT_ARCH:?EXPECT_ARCH must be set to amd64 or arm64}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -13,6 +14,14 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 case "$EXPECT_TCTL" in
   yes|no) ;;
   *) fail "EXPECT_TCTL is '$EXPECT_TCTL', expected exactly 'yes' or 'no'" ;;
+esac
+
+# Same exact-match rule as EXPECT_TCTL above, for the same reason (D13): a value
+# that fell through to a wrong branch would turn this assertion into a pass, and
+# the whole point of it is to catch a --platform that went missing.
+case "$EXPECT_ARCH" in
+  amd64|arm64) ;;
+  *) fail "EXPECT_ARCH is '$EXPECT_ARCH', expected exactly 'amd64' or 'arm64'" ;;
 esac
 
 # (a) The binary must be at /usr/local/bin/tsh specifically. That path is the
@@ -30,6 +39,23 @@ version="${version#v}"
 echo "tsh version: $version"
 [ "$version" = "$EXPECT_VERSION" ] \
   || fail "tsh is $version, expected $EXPECT_VERSION"
+
+# (b2) The image must actually be the architecture it is named for (D13). The
+# Containerfile picks the tarball from `uname -m`, so this is also a check that
+# the extraction pulled the arch-matching member -- but its real job is catching
+# a `--platform` dropped from one of the two builds in the Makefile, which would
+# publish an amd64 image under an arm64 tag with every other assertion here
+# still passing. Under qemu-user the emulated `uname` reports the target
+# machine, so this reads the same way emulated and native.
+machine="$(uname -m)"
+case "$machine" in
+  x86_64)  arch=amd64 ;;
+  aarch64) arch=arm64 ;;
+  *) fail "uname -m is '$machine', which is neither architecture this image is built for" ;;
+esac
+echo "architecture: $arch"
+[ "$arch" = "$EXPECT_ARCH" ] \
+  || fail "image is $arch, expected $EXPECT_ARCH"
 
 # (c) The exclusions are contract, not accident (D5). teleport and tbot were
 # never copied in; curl and wget are absent because the download happens in a

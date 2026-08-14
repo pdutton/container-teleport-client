@@ -21,6 +21,11 @@ TELEPORT_VERSION := 18.10.4
 AWK      ?= /usr/bin/awk
 PODMAN   ?= /usr/bin/podman
 
+# The architecture of the machine running make, in podman's naming rather than
+# uname's. Task 2 makes this the default for ARCH; until then it is what the
+# smoke test is told to expect.
+HOST_ARCH := $(patsubst aarch64,arm64,$(patsubst x86_64,amd64,$(shell uname -m)))
+
 # Registry the push target publishes to. Override to retarget:
 # `make push REGISTRY=ghcr.io/pdutton`
 #
@@ -239,6 +244,7 @@ test-variant:
 	$(PODMAN) run --rm -v ./test:/apps:ro,z \
 	  -e EXPECT_VERSION=$(TELEPORT_VERSION) \
 	  -e EXPECT_TCTL=$(EXPECT_TCTL_$(VARIANT)) \
+	  -e EXPECT_ARCH=$(HOST_ARCH) \
 	  $(LOCAL_IMAGE):$(BASE_TAG_$(VARIANT)) sh /apps/smoke.sh
 
 # Mirror every tag to $(REGISTRY). Depends on test, so a smoke-test failure
