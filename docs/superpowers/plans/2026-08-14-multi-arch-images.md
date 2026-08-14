@@ -906,15 +906,22 @@ running it:
 make -n push 2>&1 | grep -E 'podman (push|manifest push)'
 ```
 
-Expected: four plain `podman push` lines (one per variant per architecture) and
-ten `podman manifest push --all` lines (five per variant). Count them:
+Expected: four plain `podman push` lines — one per variant per architecture,
+each its own recipe line — and two `manifest push --all` occurrences.
+
+**Two, not ten**, and the difference is the point: `push-image` is invoked four
+separate times, so `make -n` prints its recipe four times, but
+`push-manifest-variant`'s five pushes happen inside a `for t in $$tags` loop,
+which `-n` prints as text rather than unrolling. Two variants, two printed
+loops. (`make -n` does recurse into `$(MAKE)` lines — that is why the four are
+four and not one.)
 
 ```bash
 make -n push 2>&1 | grep -c 'podman push'
 make -n push 2>&1 | grep -c 'manifest push --all'
 ```
 
-Expected: `4` and `10`.
+Expected: `4` and `2`.
 
 Confirm the destinations are right:
 
@@ -1156,7 +1163,14 @@ make build
 make -n push-manifests VERSION=18.10.4 | grep -c 'manifest push --all'
 ```
 
-Expected: `10`.
+Expected: `2` — one printed `for` loop per variant; `make -n` does not unroll
+it. Confirm `VERSION` propagated by checking it appears in the printed recipe:
+
+```bash
+make -n push-manifests VERSION=18.10.4 | grep -o 'version="18.10.4"' | head -1
+```
+
+Expected: one match.
 
 - [ ] **Step 6: Commit**
 
@@ -1447,7 +1461,11 @@ make -n push 2>&1 | grep -cE 'podman push'
 make -n push 2>&1 | grep -c 'manifest push --all'
 ```
 
-Expected: `4` and `10`.
+Expected: `4` and `2` — see Task 5 Step 3 for why the second is two rather than
+ten (`make -n` prints the `for` loop, it does not unroll it).
+
+The count that actually matters — ten lists reaching the registry — is verified
+in Step 2 above by inspecting all ten locally, and by the merge run itself.
 
 - [ ] **Step 5: Review the whole diff**
 
