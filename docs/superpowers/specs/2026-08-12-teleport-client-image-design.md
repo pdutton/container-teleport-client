@@ -842,8 +842,9 @@ separate repos.
   desktop client used to hold open a VNC tunnel (D8), and each would need a
   hand-verified digest pin (D6) maintained across every version bump. Adding one
   later is mechanical: a `case` arm and a digest `ARG` in the `Containerfile`, a
-  row in the arch block and a name in `REQUIRE_ARCH_SH` in the Makefile, and a
-  runner or emulator that can build it.
+  row in the arch block, a name in `REQUIRE_ARCH_SH`, a `podman manifest add`
+  line in `manifest-variant` and one line in each plain target in the Makefile,
+  and a runner or emulator that can build it.
 - **No server binary, no VNC client** (D5, D8). `tctl` was on this list until
   D12 moved it into the `admin` variant; the server binary and VNC client stay
   out of both.

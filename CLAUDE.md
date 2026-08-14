@@ -9,16 +9,15 @@ Requires Podman and GNU Make.
 
 ```bash
 make help    # lists every user-facing target and the pinned version
-make build   # builds both variants of localhost/teleport-client, applies the full tag set
-make test    # builds, then runs test/smoke.sh inside each built image
-make clean   # removes this repo's ten tags
+make build   # builds both variants for both architectures, assembles the ten manifest lists
+make test    # builds, then runs test/smoke.sh inside each of the four images
+make clean   # removes this repo's ten lists and four arch images
 make push    # builds, tests, then publishes every tag (needs registry credentials)
 ```
 
-(`make help` doesn't enumerate `tag` — it's a real target and directly
-invocable (`make tag`), not just an internal step `build` calls; the wording
-above says "every user-facing target" rather than "every target" for that
-reason.)
+(`make help` doesn't enumerate the `-image` targets individually; they're real
+and directly invocable (`make build-image VARIANT=admin ARCH=arm64`), and the
+help text says how to reach them rather than listing all six.)
 
 ## Variants
 
@@ -36,17 +35,20 @@ stays ignorant of the variant — `LABEL` and `COPY` cannot branch on a build
 arg, and this is what avoids needing them to.
 
 Every per-variant value is a row in the variant block near the top of the
-Makefile, read from the recipes as `$(<SETTING>_$(VARIANT))`. Each plain target
-(`build`, `tag`, `test`, `push`) re-invokes make once per variant against the
-matching `-variant` target; those require `VARIANT` and refuse to run without
-it, since make would otherwise expand `$(BASE_TAG_)` to nothing and fail
-somewhere much less obvious.
+Makefile, read from the recipes as `$(<SETTING>_$(VARIANT))`. The fan-out over
+variant sits one level down from the plain targets now: `build-arch`,
+`test-arch` and `push-arch` each re-invoke make once per variant against the
+matching `-image` target (`build-image`, `test-image`, `push-image`), which
+require both `VARIANT` and `ARCH` and refuse to run without them, since make
+would otherwise expand `$(BASE_TAG_)` to nothing and fail somewhere much less
+obvious.
 
 A third variant would need a row in each table, a branch in `TAG_SET_SH`, a
-name in `REQUIRE_VARIANT_SH`, and a line in each plain target — but no new
-recipe. The per-variant fan-out is written out literally rather than looped over
-a `VARIANTS` list so that `make -n` stays readable and a non-zero exit cannot be
-swallowed by a `for` loop in a recipe.
+name in `REQUIRE_VARIANT_SH`, and a line in each `-arch` target (`build-arch`,
+`test-arch`, `push-arch`) — but no new recipe. The per-variant fan-out is
+written out literally rather than looped over a `VARIANTS` list so that
+`make -n` stays readable and a non-zero exit cannot be swallowed by a `for`
+loop in a recipe.
 
 The description label is the one thing the Containerfile cannot supply for both
 variants, because `LABEL` has no conditionals. The admin build overrides
@@ -55,10 +57,38 @@ variants, because `LABEL` has no conditionals. The admin build overrides
 deliberately does *not* override it: leaving it to the Containerfile's own
 `LABEL` is what keeps the D3 check comparing two independently written copies.
 
+## Architectures
+
+`amd64` and `arm64`, from one `Containerfile` (D13). It needs no architecture
+knowledge from the Makefile: its `case "$(uname -m)"` reports `aarch64` both
+under qemu-user emulation and on a native `arm64` runner, and it already pinned
+a digest per architecture before any of this existed.
+
+Targets come in three widths, and this is the whole shape of the Makefile:
+
+| Width | Inputs | Scope |
+|---|---|---|
+| `build` `test` `push` | none | 2 variants × 2 architectures, then the lists |
+| `build-arch` `test-arch` `push-arch` | `ARCH` | both variants, one architecture — what one CI runner does |
+| `build-image` `test-image` `push-image` `stamp-image` | `VARIANT` `ARCH` | one image |
+
+The ten names of D9/D12 are manifest lists now; the images themselves carry only
+`<base>-<arch>`. `--platform` is passed to **both** `podman build` calls in
+`build-image`/`stamp-image` — the label build re-resolves `FROM` to the host
+architecture without it and silently swaps an `amd64` image in under the `arm64`
+tag, which is exactly what `EXPECT_ARCH` in the smoke test exists to catch.
+
+Local builds emulate the foreign architecture; CI builds each natively on its
+own runner (D15). Only two things differ between them, and both are parameters
+rather than branches: `MANIFEST_SRC` (local storage vs the registry, since CI's
+two architectures only meet there) and where `VERSION` comes from (a local
+readback vs a job output carrying the same readback).
+
 ## Testing
 
 `make test` is the entire test story. There is no lint step and no unit test
-suite. It greps `README.md` for the pinned version once, then runs per variant:
+suite. It greps `README.md` for the pinned version once, then runs per image —
+both variants, both architectures, four in total:
 the `org.opencontainers.image.licenses` label is exactly
 `LicenseRef-Teleport-Community-Edition`, the
 `org.opencontainers.image.description` label matches that variant's expected
@@ -82,6 +112,11 @@ still passes on a tsh-only image. `EXPECT_TCTL` is validated against exactly
 `true`/`false`: a typo that fell through to the negative branch would turn the
 admin variant's reason for existing into an assertion that passes.
 
+`EXPECT_ARCH` is validated against exactly `amd64`/`arm64` for the same reason,
+and asserts `uname -m` inside the running image. It is the one assertion that
+catches a `--platform` gone missing from one of the two builds — an `amd64`
+image published under an `arm64` name passes every other check in the file.
+
 It cannot verify an actual login, or that `tctl` administers anything: those
 need a real cluster, a password, a second factor, and a privileged role. So
 end-to-end verification of `tsh login`, the port-forward tunnel, and any real
@@ -96,11 +131,17 @@ reintroduced as an image reference, because a bare short name can resolve to a
 non-localhost repo and the push source must not depend on that tie-break.
 
 The ten-tag scheme lives in `TAG_SET_SH` in the Makefile, which switches on
-`$(VARIANT)` and is expanded by both `tag-variant` and `push-variant`, so it is
-defined once. Tags are derived by reading `tsh version` back out of the freshly
-built image, not typed by hand, so they cannot drift from what is actually
-installed. `tsh` is what gets read, not `tctl`, because it is the one binary
-both variants carry.
+`$(VARIANT)` and is expanded by `manifest-variant` and `push-manifest-variant`,
+so it is defined once. Tags are derived by reading `tsh version` back out of
+the freshly built image, not typed by hand, so they cannot drift from what is
+actually installed. `tsh` is what gets read, not `tctl`, because it is the one
+binary both variants carry.
+
+Fourteen names go up, not ten: the ten of `TAG_SET_SH` as manifest lists, plus
+`latest-amd64`, `latest-arm64`, `admin-amd64` and `admin-arm64` as plain images
+(D14). The suffix goes on the base tag only. The publish is two-phase — arch
+images first, then the lists referencing them — so an interruption between them
+leaves the lists stale until a re-run.
 
 `tsh` and `tctl` are aliases of `latest` and `admin`. That is not the same
 mistake as an `ubuntu` tag would be: a tag earns its keep when a sibling name
