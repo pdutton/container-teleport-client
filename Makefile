@@ -283,7 +283,9 @@ stamp-image:
 manifests:
 	@set -eu; \
 	v="$(VERSION)"; \
-	[ -n "$$v" ] || v="$(call READ_VERSION,tsh)"; \
+	if [ -z "$$v" ]; then \
+	  if ! { v="$(call READ_VERSION,tsh)"; } 2>/dev/null; then v=""; fi; \
+	fi; \
 	$(MAKE) --no-print-directory manifest-variant VARIANT=tsh   VERSION="$$v"; \
 	$(MAKE) --no-print-directory manifest-variant VARIANT=admin VERSION="$$v"
 
