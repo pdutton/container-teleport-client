@@ -377,8 +377,15 @@ test-image:
 	  -e EXPECT_ARCH=$(ARCH) \
 	  $(LOCAL_IMAGE):$(ARCH_TAG) sh /apps/smoke.sh
 
-# Mirror the four architecture images and then the ten lists to $(REGISTRY).
-# Depends on test, so a smoke-test failure blocks the publish.
+# Mirror the four architecture images to $(REGISTRY), assemble the ten lists
+# from the local members, and mirror those too. Depends on test, so a
+# smoke-test failure blocks the publish.
+#
+# test's prerequisite chain stops at build-arch, which builds the four images
+# and nothing else -- manifests is what assembles the lists, and only build
+# calls it. So push calls manifests itself rather than relying on test to have
+# done it; manifests is idempotent (it clears and recreates each name), so
+# this is safe even when a prior `make build` already ran it.
 #
 # Not atomic, and now in one more sense than before: the arch images go up
 # first and the lists that reference them second, so an interruption between
@@ -388,6 +395,7 @@ test-image:
 push: test
 	@$(MAKE) --no-print-directory push-arch ARCH=amd64
 	@$(MAKE) --no-print-directory push-arch ARCH=arm64
+	@$(MAKE) --no-print-directory manifests
 	@$(MAKE) --no-print-directory push-manifests
 
 push-arch:
