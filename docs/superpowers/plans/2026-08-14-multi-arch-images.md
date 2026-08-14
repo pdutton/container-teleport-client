@@ -1427,11 +1427,17 @@ its own `architecture:` line — two `amd64`, two `arm64` — and four `PASS` li
 - [ ] **Step 2: Confirm the published shape**
 
 ```bash
-podman images --format '{{.Repository}}:{{.Tag}}' | grep teleport-client | sort
+podman images --format '{{.Repository}}:{{.Tag}}' \
+  | grep -E '^localhost/teleport-client:' | sort
 ```
 
 Expected: exactly fourteen names — the ten canonical ones plus `latest-amd64`,
 `latest-arm64`, `admin-amd64`, `admin-arm64`.
+
+Anchor the match to `localhost/`. A bare `grep teleport-client` also catches
+registry-qualified images in local storage (a `docker.io/pdutton/teleport-client`
+tag left by an earlier pull or push) and reports fifteen — those are correctly
+outside `clean`'s scope, which is `localhost`-anchored for exactly this reason.
 
 ```bash
 for t in latest tsh 18 18.10 18.10.4 admin tctl 18-admin 18.10-admin 18.10.4-admin; do
