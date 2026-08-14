@@ -1492,19 +1492,26 @@ architecture is worth doing once.
 ```bash
 make -n push 2>&1 | grep -cE 'podman push'
 make -n push 2>&1 | grep -c 'manifest push --all'
-make -n push 2>&1 | grep -c 'manifest create'
+make -n push 2>&1 | grep -c 'make --no-print-directory manifests'
 ```
 
-Expected: `4`, `2`, and `10`.
+Expected: `4`, `2`, and `1`.
 
 The first two are `make -n` artefacts — see Task 5 Step 3 for why the second is
 two rather than ten (`make -n` prints the `for` loop, it does not unroll it).
 
 **The third is the one that matters.** `push` must assemble the lists before it
 pushes them: `test` stops at the four architecture images, so without a
-`manifests` call in `push` the pushes would target lists nothing had created,
-and the first two counts would still be `4` and `2`. A zero here means `push`
-is broken on a clean checkout even though every other check passes.
+`manifests` call in `push` the pushes would target lists nothing had created —
+and the first two counts would still read `4` and `2`, which is exactly how that
+bug survived six task reviews. A zero here means `push` is broken on a clean
+checkout while every other check passes.
+
+Count the `$(MAKE) manifests` invocation, not `podman manifest create`. The
+`create` calls live inside `manifest-variant`'s `for t in $$tags` loop, so
+`make -n` prints two of them — one per variant — not ten, for the same reason
+`manifest push --all` prints two. Asserting `10` there fails against correct
+code.
 
 - [ ] **Step 5: Review the whole diff**
 
