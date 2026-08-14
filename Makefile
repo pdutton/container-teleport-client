@@ -417,7 +417,9 @@ push-manifest-variant:
 	@set -eu; $(REQUIRE_VARIANT_SH)
 	@set -eu; \
 	version="$(VERSION)"; \
-	[ -n "$$version" ] || version="$(call READ_VERSION,$(VARIANT))"; \
+	if [ -z "$$version" ]; then \
+	  if ! { version="$(call READ_VERSION,$(VARIANT))"; } 2>/dev/null; then version=""; fi; \
+	fi; \
 	[ -n "$$version" ] || { \
 	  echo "ERROR: push-manifest-variant found no local image to read the version off; pass VERSION=X.Y.Z" >&2; \
 	  exit 1; \
