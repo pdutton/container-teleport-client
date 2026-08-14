@@ -100,11 +100,11 @@ DESC_LABEL_admin := --label 'org.opencontainers.image.description=$(DESC_admin)'
 # digest ARG in the Containerfile.
 
 # The architecture of the machine running make, in podman's naming rather than
-# uname's. READ_VERSION below uses it to read back a version label without
-# needing emulation just to do that, and test-variant's podman run still
-# passes it as EXPECT_ARCH -- both host-architecture reads that need no
-# emulation, unlike the arch-suffixed builds and stamps this block also
-# defines.
+# uname's. READ_VERSION below is its only consumer: it reads a version label
+# back off the host-architecture member of a variant, which is the one member
+# that needs no emulation just to read a label -- unlike the arch-suffixed
+# builds, stamps and smoke tests this block also defines, which run under
+# emulation for the non-host architecture on purpose.
 HOST_ARCH := $(patsubst aarch64,arm64,$(patsubst x86_64,amd64,$(shell uname -m)))
 
 PLATFORM_amd64 := linux/amd64
