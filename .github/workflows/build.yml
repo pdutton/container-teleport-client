@@ -18,15 +18,28 @@ concurrency:
 
 jobs:
   build:
-    name: build
-    runs-on: ubuntu-latest
-    # Two variants, so the 217 MB tarball is pulled twice: the variants differ
-    # in the download-and-extract layer, which is where podman's cache would
-    # otherwise spare the second fetch, and only the base images and the
-    # ca-certificates layer are shared. A hung fetch would otherwise burn the
-    # default six-hour job timeout. 30 minutes is generous headroom over a
-    # normal two-variant run.
+    name: build (${{ matrix.arch }})
+    # One runner per architecture rather than one runner emulating both (D15).
+    # ubuntu-24.04-arm is free for public repositories, which this is (M6), so
+    # arm64 costs nothing and pull requests get native arm64 coverage they did
+    # not have before. A local `make build` still does both under qemu; the
+    # Makefile targets invoked are the same ones either way.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Two variants per runner, and the variants diverge at exactly the layer
+    # podman's cache would otherwise reuse, so the 217 MB tarball is still
+    # pulled twice per job. Both architectures now run in parallel, so this is
+    # the same wall-clock budget as the single job it replaces.
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       # v7 runs on Node.js 24. v4 targets Node.js 20, which is deprecated, and
@@ -66,14 +79,11 @@ jobs:
 
       # Publishing happens only from master. A dispatch against another branch
       # still builds and smoke-tests, so a branch can be put through CI, but it
-      # must never overwrite the shared mutable tags (latest, 18, 18.10) with
-      # unreviewed code. This condition is the exact negation of the publish
-      # condition below -- if it were merely the pull_request check, a dispatch
-      # from a feature branch would match no step at all and the job would
-      # silently pass having done nothing.
+      # must never overwrite the shared mutable tags with unreviewed code. This
+      # condition is the exact negation of the publish condition below.
       - name: Build and smoke-test
         if: github.event_name == 'pull_request' || github.ref != 'refs/heads/master'
-        run: make PODMAN="$PODMAN" AWK="$AWK" test
+        run: make PODMAN="$PODMAN" AWK="$AWK" test-arch ARCH=${{ matrix.arch }}
 
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
@@ -82,22 +92,89 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: printf '%s' "$DOCKERHUB_TOKEN" | podman login docker.io -u "$DOCKERHUB_USERNAME" --password-stdin
 
-      # One invocation, not two: push depends on test which depends on build, so
-      # this builds, smoke-tests and publishes. Running `make test` in a separate
-      # step first would repeat the whole chain -- these targets are .PHONY and
-      # match no real file, so make re-runs them on every invocation.
-      - name: Build, smoke-test, and push
+      # One make invocation with two goals, run in order: test-arch takes
+      # build-arch as a prerequisite, and push-arch deliberately does not depend
+      # on test-arch, so this builds, smoke-tests, then publishes this
+      # architecture's two images. The manifest lists are not this job's to
+      # write -- the other architecture's images do not exist here.
+      - name: Build, smoke-test, and push this architecture
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
-        run: make PODMAN="$PODMAN" AWK="$AWK" push
+        run: make PODMAN="$PODMAN" AWK="$AWK" test-arch push-arch ARCH=${{ matrix.arch }}
+
+      # The manifest job has no image to read the version off, so it comes from
+      # here -- read back out of the built image exactly as a local `make
+      # manifests` would, so no hand-typed version reaches the tag derivation
+      # (D9, D15). Only the amd64 leg sets it: both legs would write the same
+      # value, but matrix outputs are last-writer-wins and one deterministic
+      # writer is worth more than a redundant second.
+      - name: Report the built version
+        id: version
+        if: matrix.arch == 'amd64' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        run: |
+          v=$("$PODMAN" image inspect \
+            --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
+            localhost/teleport-client:latest-amd64)
+          test -n "$v" || { echo "ERROR: no version label on latest-amd64" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Built version $v"
+
+  # The two architectures were built by different runners and only meet in the
+  # registry, so the lists are assembled from registry references
+  # (MANIFEST_SRC) rather than from local storage. Same Makefile targets a local
+  # `make push` runs -- only the two inputs D15 names differ.
+  manifest:
+    name: manifest lists
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    # No image build here: this pulls two manifests and pushes ten small lists.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Ensure podman
+        run: |
+          if ! command -v podman >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y podman
+          fi
+          PODMAN="$(command -v podman)"
+          AWK="$(command -v awk)"
+          test -n "$PODMAN" || { echo "ERROR: podman not on PATH after install" >&2; exit 1; }
+          test -n "$AWK"    || { echo "ERROR: awk not on PATH" >&2; exit 1; }
+          echo "PODMAN=$PODMAN" >> "$GITHUB_ENV"
+          echo "AWK=$AWK"       >> "$GITHUB_ENV"
+
+      - name: Log in to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: printf '%s' "$DOCKERHUB_TOKEN" | podman login docker.io -u "$DOCKERHUB_USERNAME" --password-stdin
+
+      # VERSION is passed to both invocations because this runner has no local
+      # image for the fallback readback in push-manifest-variant to inspect.
+      # MANIFEST_SRC is spelled out rather than reusing $(REGISTRY)/$(IMAGE)
+      # because the workflow cannot expand make variables; if REGISTRY is ever
+      # changed in the Makefile, this line has to change with it.
+      - name: Assemble and push the manifest lists
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          test -n "$VERSION" || { echo "ERROR: the build job reported no version" >&2; exit 1; }
+          make PODMAN="$PODMAN" AWK="$AWK" manifests \
+            VERSION="$VERSION" MANIFEST_SRC=docker.io/pdutton/teleport-client
+          make PODMAN="$PODMAN" AWK="$AWK" push-manifests VERSION="$VERSION"
 
   # Docker Hub reads nothing from this repo on its own, so the overview page
   # would drift from DOCKERHUB-OVERVIEW.md the moment either is edited alone.
-  # Same master-only guard as the publish steps: the page is shared by every
-  # consumer and a branch build must not rewrite it.
+  # Same master-only guard as the publish steps: the page is synced after the
+  # manifest lists are published, not after the images, since the lists are
+  # the last thing a consumer of this repo actually pulls.
   description:
     name: dockerhub-description
     runs-on: ubuntu-latest
-    needs: build
+    needs: manifest
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     # Just a checkout and a third-party action call; a hang here has no large
     # transfer to justify a long wait.
