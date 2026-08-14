@@ -45,9 +45,10 @@ LOCAL_IMAGE = localhost/$(IMAGE)
 #          `-admin` suffix.
 #
 # Every per-variant *setting* is a row in this block, looked up from the recipes
-# as $(<SETTING>_$(VARIANT)). The plain targets (build, tag, test, push) each
-# re-invoke make once per variant; the `-variant` targets they call are the ones
-# that do the work and require VARIANT to be set.
+# as $(<SETTING>_$(VARIANT)). The plain targets (build, test, push) each
+# re-invoke make once per variant (and, for build, per architecture too); the
+# `-variant`/`-image` targets they call are the ones that do the work and
+# require VARIANT to be set.
 #
 # Adding a third variant means adding a row to each table here, a branch to
 # TAG_SET_SH, a name to REQUIRE_VARIANT_SH, and one line to each plain target --
@@ -58,8 +59,8 @@ INCLUDE_TCTL_tsh   := false
 INCLUDE_TCTL_admin := true
 
 # The tag each variant's build writes first; every later step reads the image
-# back from it. Both are members of their own variant's tag set, so the
-# base-to-base retag in `tag-variant` is a harmless no-op.
+# back from it, and the architecture block below suffixes it with -$(ARCH) for
+# the tag an actual build lands under.
 BASE_TAG_tsh   := latest
 BASE_TAG_admin := admin
 
@@ -97,13 +98,17 @@ DESC_LABEL_admin := --label 'org.opencontainers.image.description=$(DESC_admin)'
 # here, a name in REQUIRE_ARCH_SH, a `podman manifest add` line in
 # manifest-variant, one line in each plain target, and a `case` arm plus a
 # digest ARG in the Containerfile.
-PLATFORM_amd64 := linux/amd64
-PLATFORM_arm64 := linux/arm64
 
 # The architecture of the machine running make, in podman's naming rather than
-# uname's. Task 2 makes this the default for ARCH; until then it is what the
-# smoke test is told to expect.
+# uname's. READ_VERSION below uses it to read back a version label without
+# needing emulation just to do that, and test-variant's podman run still
+# passes it as EXPECT_ARCH -- both host-architecture reads that need no
+# emulation, unlike the arch-suffixed builds and stamps this block also
+# defines.
 HOST_ARCH := $(patsubst aarch64,arm64,$(patsubst x86_64,amd64,$(shell uname -m)))
+
+PLATFORM_amd64 := linux/amd64
+PLATFORM_arm64 := linux/arm64
 
 # Where each architecture's image lands locally: the variant's base tag with the
 # architecture appended, e.g. localhost/teleport-client:admin-arm64. Only the
@@ -135,7 +140,7 @@ READ_VERSION = $$($(PODMAN) image inspect --format '{{index .Config.Labels "org.
 # somewhere much less obvious.
 REQUIRE_VARIANT_SH = case "$(VARIANT)" in \
                        tsh|admin) ;; \
-                       *) echo "ERROR: this target needs VARIANT=tsh or VARIANT=admin (got '$(VARIANT)'). Run the plain target -- build, tag, test, push -- which does both." >&2; exit 1 ;; \
+                       *) echo "ERROR: this target needs VARIANT=tsh or VARIANT=admin (got '$(VARIANT)'). Run the plain target -- build, test, push -- which does both." >&2; exit 1 ;; \
                      esac
 
 # Extra flags for the build, empty by default. The version is pinned and the
@@ -151,8 +156,8 @@ GIT_REV    := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 
 # Shell snippet, expanded inside a recipe. Given $version already set by the
 # recipe and VARIANT set by make, it sets $tags to that variant's full tag list.
-# Both `tag-variant` and `push-variant` expand it, so the tag scheme is defined
-# in exactly one place.
+# Nothing expands it yet -- manifest-variant and push-manifest-variant will,
+# so the tag scheme stays defined in exactly one place.
 #
 # Written as one logical line: backslash continuations in a variable assignment
 # collapse to spaces, so expanding this inside a recipe cannot introduce a
