@@ -56,15 +56,17 @@ LOCAL_IMAGE = localhost/$(IMAGE)
 #
 # Every per-variant *setting* is a row in this block, looked up from the recipes
 # as $(<SETTING>_$(VARIANT)). The plain targets (build, test, push) each
-# re-invoke make once per variant (and, for build, per architecture too); the
-# `-variant`/`-image` targets they call are the ones that do the work and
-# require VARIANT to be set.
+# re-invoke make once per architecture, calling their `-arch` target twice; it
+# is the `-arch` targets that re-invoke once per variant, calling the
+# `-image` targets that do the actual work and require both VARIANT and ARCH
+# to be set.
 #
 # Adding a third variant means adding a row to each table here, a branch to
-# TAG_SET_SH, a name to REQUIRE_VARIANT_SH, and one line to each plain target --
-# but no new recipe. The fan-out is written out rather than looped over a
-# VARIANTS list on purpose: two literal lines survive `make -n` legibly and
-# cannot swallow a non-zero exit the way a `for` loop in a recipe can.
+# TAG_SET_SH, a name to REQUIRE_VARIANT_SH, and one line to each `-arch`
+# target -- but no new recipe. The fan-out is written out rather than looped
+# over a VARIANTS list on purpose: two literal lines survive `make -n`
+# legibly and cannot swallow a non-zero exit the way a `for` loop in a
+# recipe can.
 INCLUDE_TCTL_tsh   := false
 INCLUDE_TCTL_admin := true
 

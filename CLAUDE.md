@@ -15,9 +15,11 @@ make clean   # removes this repo's ten lists and four arch images
 make push    # builds, tests, then publishes every tag (needs registry credentials)
 ```
 
-(`make help` doesn't enumerate the `-image` targets individually; they're real
-and directly invocable (`make build-image VARIANT=admin ARCH=arm64`), and the
-help text says how to reach them rather than listing all six.)
+(`make help` doesn't enumerate the `-image` targets individually — of the four
+(`build-image`, `test-image`, `push-image`, `stamp-image`), its narrowing hint
+names only the first three; `stamp-image` is an internal step of `build-image`
+rather than something invoked on its own. All four are still real and directly
+invocable (`make build-image VARIANT=admin ARCH=arm64`).)
 
 ## Variants
 
@@ -64,13 +66,15 @@ knowledge from the Makefile: its `case "$(uname -m)"` reports `aarch64` both
 under qemu-user emulation and on a native `arm64` runner, and it already pinned
 a digest per architecture before any of this existed.
 
-Targets come in three widths, and this is the whole shape of the Makefile:
+Targets come in five widths, and this is the whole shape of the Makefile:
 
 | Width | Inputs | Scope |
 |---|---|---|
 | `build` `test` `push` | none | 2 variants × 2 architectures, then the lists |
 | `build-arch` `test-arch` `push-arch` | `ARCH` | both variants, one architecture — what one CI runner does |
 | `build-image` `test-image` `push-image` `stamp-image` | `VARIANT` `ARCH` | one image |
+| `manifests` `push-manifests` | none (optional `VERSION`, `MANIFEST_SRC`) | both variants' lists — ten manifest lists total |
+| `manifest-variant` `push-manifest-variant` | `VARIANT` | one variant's five lists |
 
 The ten names of D9/D12 are manifest lists now; the images themselves carry only
 `<base>-<arch>`. `--platform` is passed to **both** `podman build` calls in
