@@ -115,12 +115,13 @@ DESC_LABEL_admin := --label 'org.opencontainers.image.description=$(DESC_admin)'
 # .github/workflows/build.yml naming a runner that can build it.
 
 # The architecture of the machine running make, in podman's naming rather than
-# uname's. Two consumers: READ_VERSION below, which reads a version label back
+# uname's. Three consumers: READ_VERSION below, which reads a version label back
 # off the host-architecture member of a variant -- the one member that needs no
 # emulation just to read a label, unlike the arch-suffixed builds, stamps and
 # smoke tests this block also defines, which run under emulation for the
-# non-host architecture on purpose -- and `help`, which names it so the reader
-# knows which of the two they get natively.
+# non-host architecture on purpose -- `help`, which names it so the reader
+# knows which of the two they get natively -- and the `manifests` recipe's error
+# message, which names the image it failed to inspect.
 HOST_ARCH := $(patsubst aarch64,arm64,$(patsubst x86_64,amd64,$(shell uname -m)))
 
 PLATFORM_amd64 := linux/amd64
