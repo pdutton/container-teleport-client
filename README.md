@@ -247,6 +247,27 @@ now fails the build rather than silently going stale. See
 pinned rather than resolved, and `CLAUDE.md` for the mechanics of bumping it (which also means
 updating the two per-architecture digest pins in the Containerfile).
 
+## Architectures
+
+Published for `linux/amd64` and `linux/arm64`. Every one of the ten tags in the
+table above is a manifest list, so `podman pull …:latest` (or `docker pull`)
+resolves to the architecture you are on with nothing to specify.
+
+Four extra tags name a single architecture directly — `latest-amd64`,
+`latest-arm64`, `admin-amd64`, `admin-arm64`. They exist because CI builds each
+architecture on a runner of that architecture and the two images have to meet in
+the registry before a list can reference them. Pull one if you are deliberately
+testing the other architecture's image; otherwise use the plain tags.
+
+`make build` produces both architectures on one machine, emulating the foreign
+one through `binfmt_misc` (see [Building Locally](#building-locally) below). On
+Debian and Ubuntu that needs `qemu-user-static` installed; on Fedora,
+`qemu-user-static` plus `systemd-binfmt`. Check it is registered with:
+
+    cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+
+To build only your own architecture, narrow it: `make build-arch ARCH=amd64`.
+
 ## Why the Version Is Pinned Rather Than Resolved
 
 There is no usable release index for Teleport to resolve a version against at build time.
@@ -346,24 +367,3 @@ A copy of the Community Edition licence travels inside every image at
 Both licences must be complied with when using this image. The eligibility limit stated at the top
 of this document is part of the Community Edition licence's terms, not a separate policy of this
 repo.
-
-## Architectures
-
-Published for `linux/amd64` and `linux/arm64`. Every tag in the table above is a
-manifest list, so `podman pull …:latest` (or `docker pull`) resolves to the
-architecture you are on with nothing to specify.
-
-Four extra tags name a single architecture directly — `latest-amd64`,
-`latest-arm64`, `admin-amd64`, `admin-arm64`. They exist because CI builds each
-architecture on a runner of that architecture and the two images have to meet in
-the registry before a list can reference them. Pull one if you are deliberately
-testing the other architecture's image; otherwise use the plain tags.
-
-`make build` produces both architectures on one machine, emulating the foreign
-one through `binfmt_misc`. On Debian and Ubuntu that needs `qemu-user-static`
-installed; on Fedora, `qemu-user-static` plus `systemd-binfmt`. Check it is
-registered with:
-
-    cat /proc/sys/fs/binfmt_misc/qemu-aarch64
-
-To build only your own architecture, narrow it: `make build-arch ARCH=amd64`.

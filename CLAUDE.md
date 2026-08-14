@@ -8,18 +8,27 @@ code in this repository.
 Requires Podman and GNU Make.
 
 ```bash
-make help    # lists every user-facing target and the pinned version
+make help    # the four whole-repo targets, how to narrow them, the pinned version
 make build   # builds both variants for both architectures, assembles the ten manifest lists
 make test    # builds, then runs test/smoke.sh inside each of the four images
 make clean   # removes this repo's ten lists and four arch images
 make push    # builds, tests, then publishes every tag (needs registry credentials)
 ```
 
-(`make help` doesn't enumerate the `-image` targets individually — of the four
-(`build-image`, `test-image`, `push-image`, `stamp-image`), its narrowing hint
-names only the first three; `stamp-image` is an internal step of `build-image`
-rather than something invoked on its own. All four are still real and directly
-invocable (`make build-image VARIANT=admin ARCH=arm64`).)
+`make help` is a summary, not an index. It names `build`, `test`, `push` and
+`clean` in full, then points at the `-arch` and `-image` targets as the two ways
+to narrow them. Six real targets it never mentions:
+
+- `stamp-image` — an internal step of `build-image`, not something invoked on
+  its own, so the narrowing hint names only `build-image`, `test-image` and
+  `push-image`.
+- `check-readme` — a prerequisite of `test-arch`, not a thing to run.
+- `manifests` / `push-manifests` and `manifest-variant` /
+  `push-manifest-variant` — reached from `build` and `push`, and spelled out in
+  the width table under "Architectures" below rather than in `help`.
+
+All of them are real and directly invocable
+(`make build-image VARIANT=admin ARCH=arm64`).
 
 ## Variants
 
@@ -74,7 +83,11 @@ Targets come in five widths, and this is the whole shape of the Makefile:
 | `build-arch` `test-arch` `push-arch` | `ARCH` | both variants, one architecture — what one CI runner does |
 | `build-image` `test-image` `push-image` `stamp-image` | `VARIANT` `ARCH` | one image |
 | `manifests` `push-manifests` | none (optional `VERSION`, `MANIFEST_SRC`) | both variants' lists — ten manifest lists total |
-| `manifest-variant` `push-manifest-variant` | `VARIANT` | one variant's five lists |
+| `manifest-variant` `push-manifest-variant` | `VARIANT`, plus `VERSION` — required by `manifest-variant`, optional for `push-manifest-variant` | one variant's five lists |
+
+`check-readme` sits outside these widths: no inputs, one grep of `README.md` for
+the pinned version, and a prerequisite of `test-arch` rather than of `test`,
+because CI only ever enters at `test-arch` (see "Testing" below).
 
 The ten names of D9/D12 are manifest lists now; the images themselves carry only
 `<base>-<arch>`. `--platform` is passed to **both** `podman build` calls in
@@ -91,8 +104,13 @@ readback vs a job output carrying the same readback).
 ## Testing
 
 `make test` is the entire test story. There is no lint step and no unit test
-suite. It greps `README.md` for the pinned version once, then runs per image —
-both variants, both architectures, four in total:
+suite. The `README.md` grep for the pinned version is its own target,
+`check-readme`, hanging off `test-arch` — not off `test`, which CI never runs:
+pull requests run `make test-arch ARCH=…` and master runs
+`make test-arch push-arch ARCH=…`, so a check living only in `test` would be
+enforced by nothing. `make test` therefore greps twice, once per architecture,
+which is harmless. The rest runs per image — both variants, both architectures,
+four in total:
 the `org.opencontainers.image.licenses` label is exactly
 `LicenseRef-Teleport-Community-Edition`, the
 `org.opencontainers.image.description` label matches that variant's expected

@@ -130,7 +130,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
-    # No image build here: this pulls two manifests and pushes ten small lists.
+    # No image build here, but not nothing either: assembling the lists reads
+    # the four arch images' manifests back out of the registry, and `podman
+    # manifest push --all` copies each member instance -- its config and
+    # manifest -- alongside every list it pushes. The layer blobs are already in
+    # this same repository, put there by the build jobs, so the push finds them
+    # present and skips them instead of sending them again. Still far cheaper
+    # than a build, hence half the timeout the build jobs get.
     timeout-minutes: 15
 
     steps:

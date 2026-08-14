@@ -343,6 +343,12 @@ now checked against each other. It is still a plain text search, not a version
 parse — it confirms the number appears somewhere in the prose, not that every
 sentence mentioning it is accurate.
 
+**Extended by D15 (2026-08-14):** the grep is its own target, `check-readme`,
+and hangs off `test-arch` rather than sitting inside `test`. CI enters at
+`test-arch` on both of its paths and never runs `test`, so a check reachable
+only from `test` would have been enforced nowhere. `make test` still reaches it —
+twice, once per architecture, which costs one extra grep.
+
 ### D5. Contents: `tsh`, its licence, and a cert store — nothing else
 
 `/usr/local/bin/tsh`, `/usr/share/doc/teleport/LICENSE-community` (D2), and the
@@ -622,6 +628,11 @@ is written once (by `tag-variant` and `push-variant` since D12, switching on
 a failing smoke test blocks the publish; and a `clean` scoped to this repo's own
 tags.
 
+**Extended by D13–D14 (2026-08-14):** `tag` and `tag-variant` are gone, and so is
+`push-variant`. The ten names label manifest lists now, so `TAG_SET_SH` is
+expanded by `manifest-variant` and `push-manifest-variant` instead — still one
+definition, still switching on `$(VARIANT)`, and the readback still feeds it.
+
 `.github/workflows/build.yml` mirrors the siblings without the matrix: build and
 smoke-test on pull requests, publish only from `master` (a `workflow_dispatch`
 against another branch still builds and tests but publishes nothing), and a
@@ -783,10 +794,14 @@ The obvious risk in having two mechanisms is that they drift, and the answer is
 that there is only one mechanism with an input. The Makefile gains `ARCH`
 alongside `VARIANT` as a second fan-out dimension, in the same written-out style
 D12 chose for variants and for the same reasons — `make -n` stays readable and a
-`for` loop in a recipe cannot swallow a non-zero exit. Every unit of work lives
-in an `-arch` target keyed on both, guarded by a `REQUIRE_ARCH_SH` mirroring
-`REQUIRE_VARIANT_SH` (make expands an unset `$(PLATFORM_)` to nothing and fails
-somewhere much less obvious). `podman build --platform` is passed identically in
+`for` loop in a recipe cannot swallow a non-zero exit. The `-arch` targets take
+`ARCH` alone and cover both variants — the unit of work one CI runner does — and
+under them sit `-image` targets taking both `VARIANT` and `ARCH`, which are where
+the single-image `podman` work actually happens; a plain target fans out to the
+first, and an `-arch` target to the second. Both levels are guarded by a
+`REQUIRE_ARCH_SH` mirroring `REQUIRE_VARIANT_SH` (make expands an unset
+`$(PLATFORM_)` to nothing and fails somewhere much less obvious). `podman build
+--platform` is passed identically in
 both halves; on a native runner it is simply a no-op assertion of what the host
 already is. What differs between local and CI is only *which* of the four
 `(variant, arch)` pairs a given invocation runs — the fan-out, not the recipe.
@@ -844,7 +859,9 @@ separate repos.
   later is mechanical: a `case` arm and a digest `ARG` in the `Containerfile`, a
   row in the arch block, a name in `REQUIRE_ARCH_SH`, a `podman manifest add`
   line in `manifest-variant` and one line in each plain target in the Makefile,
-  and a runner or emulator that can build it.
+  both of `test/smoke.sh`'s architecture `case` statements (the `EXPECT_ARCH`
+  validation and the `uname -m` map, which reject an unrecognised value on
+  purpose), and a runner or emulator that can build it.
 - **No server binary, no VNC client** (D5, D8). `tctl` was on this list until
   D12 moved it into the `admin` variant; the server binary and VNC client stay
   out of both.

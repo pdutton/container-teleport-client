@@ -106,17 +106,21 @@ DESC_LABEL_admin := --label 'org.opencontainers.image.description=$(DESC_admin)'
 # arm64 runner, so the same file is correct in both halves of D15.
 #
 # Same written-out fan-out rule as the variant block: two literal lines, no
-# ARCHES list looped over in a recipe. Adding a third architecture means a row
-# here, a name in REQUIRE_ARCH_SH, a `podman manifest add` line in
-# manifest-variant, one line in each plain target, and a `case` arm plus a
-# digest ARG in the Containerfile.
+# ARCHES list looped over in a recipe. Adding a third architecture means, in
+# this file, a row here, a name in REQUIRE_ARCH_SH, a `podman manifest add` line
+# in manifest-variant and one line in each plain target -- and outside it, a
+# `case` arm plus a digest ARG in the Containerfile, both of test/smoke.sh's
+# architecture `case` statements (the EXPECT_ARCH validation and the `uname -m`
+# map, which reject an unrecognised value on purpose), and a matrix entry in
+# .github/workflows/build.yml naming a runner that can build it.
 
 # The architecture of the machine running make, in podman's naming rather than
-# uname's. READ_VERSION below is its only consumer: it reads a version label
-# back off the host-architecture member of a variant, which is the one member
-# that needs no emulation just to read a label -- unlike the arch-suffixed
-# builds, stamps and smoke tests this block also defines, which run under
-# emulation for the non-host architecture on purpose.
+# uname's. Two consumers: READ_VERSION below, which reads a version label back
+# off the host-architecture member of a variant -- the one member that needs no
+# emulation just to read a label, unlike the arch-suffixed builds, stamps and
+# smoke tests this block also defines, which run under emulation for the
+# non-host architecture on purpose -- and `help`, which names it so the reader
+# knows which of the two they get natively.
 HOST_ARCH := $(patsubst aarch64,arm64,$(patsubst x86_64,amd64,$(shell uname -m)))
 
 PLATFORM_amd64 := linux/amd64
@@ -146,10 +150,13 @@ REQUIRE_ARCH_SH = case "$(ARCH)" in \
 # one that needs no emulation just to read a label.
 READ_VERSION = $$($(PODMAN) image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' $(LOCAL_IMAGE):$(BASE_TAG_$(1))-$(HOST_ARCH))
 
-# Guard for the `-variant` targets. They index the tables above by $(VARIANT),
-# and make expands an unset $(BASE_TAG_) to nothing rather than complaining, so
-# without this a bare `make tag` would run against `$(LOCAL_IMAGE):` and fail
-# somewhere much less obvious.
+# Guard for the `-image` targets (build-image, stamp-image, test-image,
+# push-image) and the two per-variant manifest targets (manifest-variant,
+# push-manifest-variant), exactly parallel to REQUIRE_ARCH_SH above and needed
+# for the same reason: they index the variant tables by $(VARIANT), and make
+# expands an unset $(BASE_TAG_) to nothing rather than complaining, so without
+# this a bare `make build-image ARCH=amd64` would build under
+# `$(LOCAL_IMAGE):-amd64` and fail somewhere much less obvious.
 REQUIRE_VARIANT_SH = case "$(VARIANT)" in \
                        tsh|admin) ;; \
                        *) echo "ERROR: this target needs VARIANT=tsh or VARIANT=admin (got '$(VARIANT)'). Run the plain target -- build, test, push -- which does both." >&2; exit 1 ;; \
@@ -168,8 +175,8 @@ GIT_REV    := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 
 # Shell snippet, expanded inside a recipe. Given $version already set by the
 # recipe and VARIANT set by make, it sets $tags to that variant's full tag list.
-# manifest-variant expands it now; push-manifest-variant will too, so the tag
-# scheme stays defined in exactly one place.
+# manifest-variant and push-manifest-variant both expand it, and nothing else
+# does, so the tag scheme stays defined in exactly one place.
 #
 # Written as one logical line: backslash continuations in a variable assignment
 # collapse to spaces, so expanding this inside a recipe cannot introduce a
@@ -200,9 +207,9 @@ TAG_SET_SH = case "$$version" in \
              esac
 
 .DEFAULT_GOAL := help
-.PHONY: help build build-arch build-image stamp-image test test-arch test-image \
-        manifests manifest-variant push push-arch push-image push-manifests \
-        push-manifest-variant clean
+.PHONY: help build build-arch build-image stamp-image check-readme test \
+        test-arch test-image manifests manifest-variant push push-arch \
+        push-image push-manifests push-manifest-variant clean
 
 help:
 	@echo "Targets:"
@@ -276,24 +283,41 @@ stamp-image:
 	  | $(PODMAN) build --platform $(PLATFORM_$(ARCH)) -f - -t "$(LOCAL_IMAGE):$(ARCH_TAG)" .; \
 	echo "Stamped $(LOCAL_IMAGE):$(ARCH_TAG) with version $$version"
 
-# The five names a variant carries are manifest lists over the two arch images
-# (D13/D14). VERSION is required rather than read here: the CI manifest job has
-# no local image to inspect and receives it as a job output from the build job,
-# which read it back off the image exactly as `manifests` does below. Either
-# way no hand-typed version reaches the tag derivation, which is what D9's
-# readback rule protects.
+# The ten names the two variants carry are manifest lists over the two arch
+# images (D13/D14); this is the fan-out that builds all ten.
+#
+# VERSION is optional here and required in manifest-variant. CI passes it,
+# because its manifest job has no local image to inspect; locally the fallback
+# reads it back off the tsh variant's host-architecture member, which is free --
+# an inspect of the label stamp-image wrote, not a container start, and of the
+# host's member so no emulation is needed. One readback covers both variants for
+# the reason spelled out over manifest-variant below.
+#
+# The readback is wrapped in `if !` rather than left bare because `set -e` would
+# otherwise abort the recipe outright when there is no image to inspect, before
+# the empty-version check below can say anything useful.
 manifests:
 	@set -eu; \
 	v="$(VERSION)"; \
 	if [ -z "$$v" ]; then \
 	  if ! { v="$(call READ_VERSION,tsh)"; } 2>/dev/null; then v=""; fi; \
 	fi; \
+	[ -n "$$v" ] || { \
+	  echo "ERROR: no VERSION given, and no $(LOCAL_IMAGE):$(BASE_TAG_tsh)-$(HOST_ARCH) to read one off. Run 'make build' first, or pass VERSION=X.Y.Z." >&2; \
+	  exit 1; \
+	}; \
 	$(MAKE) --no-print-directory manifest-variant VARIANT=tsh   VERSION="$$v"; \
 	$(MAKE) --no-print-directory manifest-variant VARIANT=admin VERSION="$$v"
 
 # Both variants ship the same tsh out of the same tarball, so one version covers
 # both lists -- the same reason TAG_SET_SH has only ever taken a single $version
 # and tag derivation reads tsh rather than tctl.
+#
+# VERSION is required here rather than read back, unlike in manifests above: the
+# CI manifest job has no local image to inspect and receives it as a job output
+# from the build job, which read it back off the image exactly as manifests
+# does. Either way no hand-typed version reaches the tag derivation, which is
+# what D9's readback rule protects.
 #
 # A name may already exist as a plain image from a build that predates this
 # scheme, or as a list from a previous run. Both are cleared first: `manifest
@@ -333,7 +357,24 @@ manifest-variant:
 #   3. org.opencontainers.image.description contains the pinned version, i.e.
 #      the label actually interpolates TELEPORT_VERSION rather than a
 #      hand-typed string that could drift from it (D3).
+#
+# 1 is repo-wide and hangs off test-arch as check-readme below; 2 and 3 are
+# per-image and live in test-image.
 test:
+	@$(MAKE) --no-print-directory test-arch ARCH=amd64
+	@$(MAKE) --no-print-directory test-arch ARCH=arm64
+
+# A target of its own rather than a line in `test`, because CI never runs
+# `test`: both workflow paths enter at test-arch (`make test-arch ARCH=...` on a
+# pull request, `make test-arch push-arch ARCH=...` on master) and the manifest
+# job runs neither. A check living only in `test` would therefore be enforced by
+# nothing in CI, which is the opposite of what D4 claims for this copy of the
+# pin. Hanging it off test-arch puts it on every path that tests.
+#
+# `make test` calls test-arch twice, so a full local run greps README.md twice.
+# That is one grep over one file, and cheaper than the stamp file or order-only
+# arrangement it would take to run it once.
+check-readme:
 	@grep -q '$(TELEPORT_VERSION)' README.md || { \
 	  echo "FAIL: README.md does not mention $(TELEPORT_VERSION); the version pin" >&2; \
 	  echo "      has three copies (Containerfile, Makefile, README.md) and this" >&2; \
@@ -341,14 +382,13 @@ test:
 	  echo "      same commit as any version bump." >&2; \
 	  exit 1; \
 	}
-	@$(MAKE) --no-print-directory test-arch ARCH=amd64
-	@$(MAKE) --no-print-directory test-arch ARCH=arm64
 
 # build-arch is a prerequisite rather than something `test` depends on, so that
 # a CI runner can say `make test-arch ARCH=arm64` and get the build for free.
 # ARCH is a command-line variable in that invocation, so it reaches the
-# prerequisite too.
-test-arch: build-arch
+# prerequisite too. check-readme needs no input and is listed first so that a
+# serial make reaches it before spending the build on a stale README.
+test-arch: check-readme build-arch
 	@set -eu; $(REQUIRE_ARCH_SH)
 	@$(MAKE) --no-print-directory test-image VARIANT=tsh   ARCH=$(ARCH)
 	@$(MAKE) --no-print-directory test-image VARIANT=admin ARCH=$(ARCH)
@@ -417,8 +457,12 @@ push-manifests:
 
 # --all pushes the member images alongside the list. In CI they are already
 # there, having been pushed by the two build jobs, and re-pushing is a no-op on
-# unchanged blobs; locally it is what makes `make push` work on its own without
-# a separate member push. Same flag both ways, so the two halves stay identical.
+# unchanged blobs. It is not what makes `make push` work either: push mirrors
+# the four arch images itself, calling push-arch twice before it reaches
+# push-manifests. What --all buys is that `make push-manifests` stands on its
+# own -- run against a registry that has never seen the members, it uploads them
+# rather than publishing ten lists of references to nothing. Same flag both
+# ways, so the two halves stay identical.
 #
 # VERSION is optional here and required in manifest-variant, for the same reason
 # in both: the CI manifest job has no local image to inspect, so it passes the
