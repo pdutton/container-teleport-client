@@ -68,6 +68,16 @@ jobs:
           # The absolute path was never load-bearing here: the Makefile takes
           # PODMAN and AWK as overridable variables precisely so a caller can
           # say where its tools are. CI is such a caller, and now says so.
+          #
+          # This is `command -v`, the caller's PATH, where the Makefile itself
+          # uses `command -pv` and refuses to fall back to a PATH lookup. The
+          # difference is deliberate and it is where the trust boundary sits:
+          # the Makefile will not let an ambient PATH choose which podman
+          # publishes images, but it does honour a path handed to it. Resolving
+          # here has to use the wider search, because the runner keeps podman
+          # in /usr/local/bin, outside the default PATH the Makefile consults.
+          # What is trusted is the runner image, which is also what supplies
+          # the podman being resolved.
           PODMAN="$(command -v podman)"
           AWK="$(command -v awk)"
           test -n "$PODMAN" || { echo "ERROR: podman not on PATH after install" >&2; exit 1; }
@@ -155,6 +165,19 @@ jobs:
           echo "PODMAN=$PODMAN" >> "$GITHUB_ENV"
           echo "AWK=$AWK"       >> "$GITHUB_ENV"
 
+      # Only this job needs jq -- check-published parses `podman manifest
+      # inspect` output with it. Resolved from PATH and installed if absent,
+      # the same way podman is, rather than assuming the runner image ships it.
+      - name: Ensure jq
+        run: |
+          if ! command -v jq >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+          JQ="$(command -v jq)"
+          test -n "$JQ" || { echo "ERROR: jq not on PATH after install" >&2; exit 1; }
+          echo "JQ=$JQ" >> "$GITHUB_ENV"
+
       - name: Log in to Docker Hub
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -174,6 +197,17 @@ jobs:
           make PODMAN="$PODMAN" AWK="$AWK" manifests \
             VERSION="$VERSION" MANIFEST_SRC=docker.io/pdutton/teleport-client
           make PODMAN="$PODMAN" AWK="$AWK" push-manifests VERSION="$VERSION"
+
+      # Reads the registry back rather than trusting that the pushes above
+      # reported success, and compares each published list against the arch
+      # images published beside it -- so a list left pointing at a previous
+      # run's members fails here even though it still has two members of the
+      # right architectures. Both sides come from the registry, so this needs
+      # no local image and would give the same verdict run from anywhere.
+      - name: Verify the published lists
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: make PODMAN="$PODMAN" AWK="$AWK" JQ="$JQ" check-published VERSION="$VERSION"
 
   # Docker Hub reads nothing from this repo on its own, so the overview page
   # would drift from DOCKERHUB-OVERVIEW.md the moment either is edited alone.

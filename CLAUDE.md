@@ -165,6 +165,42 @@ Fourteen names go up, not ten: the ten of `TAG_SET_SH` as manifest lists, plus
 images first, then the lists referencing them — so an interruption between them
 leaves the lists stale until a re-run.
 
+`check-published` is what notices that. It reads the registry back and asserts
+every published list points at exactly the arch images published beside it —
+not merely that it has two members of the right architectures, which a stale
+list also has. Both sides are resolved from the registry, which is the point:
+comparing against locally assembled lists would report a mismatch whenever the
+local images are a different build, and they nearly always are, since the
+`created` and `revision` labels alone change the digest. So it needs no local
+images and gives the same verdict from any checkout at any time.
+
+It runs at the end of `push` and as the last step of CI's `manifest` job, and
+is worth running by hand after any partial or interrupted publish. What it
+cannot do is make an interrupted run fail on the spot — a run that dies before
+`push-manifests` never reaches this either. It turns that case from unnoticed
+into caught on the next run.
+
+`podman manifest add` against a remote reference records that tag's digest
+without pulling layers, so building the expectation costs four manifest fetches
+rather than four image pulls. This is the one target that needs `jq`.
+
+`AWK`, `PODMAN` and `JQ` are resolved with `command -pv`, not hardcoded and not
+looked up on the caller's `PATH`. The `-p` is the point: it searches the
+system's default PATH, so an inherited or tampered `PATH` cannot decide which
+podman publishes your images. **There is deliberately no fallback to a bare
+name** — that would hand resolution straight back to `PATH` and undo the whole
+thing. A tool that is not found is an error.
+
+The error is deferred rather than raised at parse time (the variables are
+recursive, so `$(error …)` fires on first expansion): `make help` and
+`make clean` still work on a machine that has never installed jq, which only
+`check-published` uses.
+
+An explicit override is the escape hatch and is different in kind — a path
+passed in is a deliberate decision by whoever ran make, not an ambient one:
+`make PODMAN=/usr/local/bin/podman build`. CI uses it, because the runners keep
+podman outside the default PATH.
+
 `tsh` and `tctl` are aliases of `latest` and `admin`. That is not the same
 mistake as an `ubuntu` tag would be: a tag earns its keep when a sibling name
 gives it contrast, and `tsh` reads as a choice only because `tctl` sits beside
