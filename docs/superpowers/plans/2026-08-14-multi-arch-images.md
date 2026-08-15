@@ -65,12 +65,27 @@ Three levels, each named for what it does. Read this before Task 2.
 | `manifests` / `push-manifests` | none (`VERSION`, `MANIFEST_SRC` optional) | both variants' lists |
 | `manifest-variant` / `push-manifest-variant` | `VARIANT` (+ `VERSION`) | one variant's five lists |
 
-### Timing warning
+### Timing
 
 A full local `make test` builds four images, two of them emulated, and the
-`arm64` half downloads and extracts a 217 MB tarball under QEMU. Expect roughly
-20–35 minutes. **While developing, work one architecture at a time**
-(`make build-arch ARCH=amd64`) and run the full sweep only where a task says to.
+`arm64` half downloads and extracts a 217 MB tarball under QEMU.
+
+**Measured, from a completely cleared podman cache: about 3 minutes.** CI is
+faster still, since both architectures build natively and in parallel — around
+50-60 seconds per architecture.
+
+An earlier draft of this plan warned of 20-45 minutes. That was wrong, and
+wrong in an instructive way: it generalised from watching one `arm64` build sit
+in `update-ca-certificates`, where each certificate check is a separate emulated
+process spawn. That phase is genuinely the slowest part of the emulated build,
+but it is seconds, not tens of minutes, and the rest of the build is fast enough
+that the whole thing finishes in about the time a single native build takes.
+Emulation is a real cost here; it is not the order-of-magnitude cost the earlier
+number implied.
+
+Narrowing to one architecture (`make build-arch ARCH=amd64`) is still the
+quicker inner loop, but the full sweep is cheap enough to run whenever you want
+reassurance.
 
 ---
 
@@ -436,7 +451,8 @@ podman images --format '{{.Repository}}:{{.Tag}}' | grep teleport-client
 Expected: `localhost/teleport-client:latest-amd64` and
 `localhost/teleport-client:admin-amd64`, and no bare `latest`/`admin`.
 
-Then the emulated one (**slow — allow ~15 minutes**):
+Then the emulated one (slower than the native build, but a matter of minutes,
+not tens of them):
 
 ```bash
 make build-arch ARCH=arm64
@@ -1440,9 +1456,9 @@ make build
 make test
 ```
 
-**Allow 25–45 minutes.** `make build` produces the four images and the ten
-lists; `make test` then re-enters `build-arch` (cached, fast) and runs the four
-smoke tests. Expected: four smoke tests, each printing its own `architecture:`
+**About 3 minutes from a cleared cache.** `make build` produces the four images
+and the ten lists; `make test` then re-enters `build-arch` (cached, fast) and
+runs the four smoke tests. Expected: four smoke tests, each printing its own `architecture:`
 line — two `amd64`, two `arm64` — and four `PASS` lines.
 
 `make test` alone is not enough here, and the reason is worth knowing: `test`
@@ -1546,10 +1562,12 @@ test` is the entire story: label checks from outside the image, then
 means "run the assertion against something it should reject and watch it not
 reject it" — the smoke test's own invocation is the harness.
 
-**Why the arm64 build is slow.** The `downloader` stage runs `curl` and `tar`
-under QEMU on a 217 MB tarball. This was a deliberate choice (D13): running that
-stage natively would mean replacing `uname -m` with `TARGETARCH`, which is the
-load-bearing line in D2 and D6. Do not "optimise" it.
+**Why the arm64 build runs emulated at all.** The `downloader` stage runs
+`curl` and `tar` under QEMU on a 217 MB tarball. This was a deliberate choice
+(D13): running that stage natively would mean replacing `uname -m` with
+`TARGETARCH`, which is the load-bearing line in D2 and D6. Do not "optimise"
+it — and note the cost is smaller than it looks, since a full cleared-cache
+build of all four images measures around 3 minutes.
 
 **If `podman manifest add` cannot reach a registry reference** in the CI manifest
 job, the fallback is `podman manifest add` against
