@@ -834,6 +834,14 @@ still point at the previous members. D11's existing
 the workflow repairs it. It is a recoverable inconsistency, not a reason to
 ship the artifact-shuffling alternative.
 
+**Extended by D16 (2026-08-15):** the inconsistency is now detected rather than
+merely recoverable. `check-published` reads the registry back and compares each
+published list against the arch images published beside it, so a stale list
+fails even though it still carries two members of the right architectures. It
+still cannot fail *during* an interrupted run — a run that dies before the
+lists are pushed never reaches the check — so what it converts is "unnoticed
+until someone pulls" into "red on the next run".
+
 **CI cost.** Four builds per run instead of two, but across two runners in
 parallel, so wall-clock per job is unchanged from D12's measurement and the
 30-minute `timeout-minutes` still holds. Pull requests now get full `arm64`
@@ -843,6 +851,44 @@ coverage, natively, which they did not have before.
 list multi-arch under "Planned" and neither has a pattern to copy — this becomes
 the family's reference implementation, but porting it is separate work in
 separate repos.
+
+### D16. The publish verifies itself, against the registry rather than local storage
+
+**Added 2026-08-15.** This extends D15 and annotates it in place. Nothing about
+what gets published changes; what changes is that the run reads back what
+landed instead of trusting that its pushes reported success.
+
+`check-published` asserts that every one of the ten published lists points at
+exactly the two architecture images published beside it. The weaker check —
+"each list has two members, `amd64` and `arm64`" — was considered and rejected:
+a list left stale by an interrupted run satisfies it exactly, so it would report
+success on the one failure D15 names.
+
+**Both sides are read from the registry, and that is the load-bearing choice.**
+Comparing a published list against the locally assembled one seems natural and
+is wrong: the `created` and `revision` labels alone give a local build different
+digests from CI's, so the comparison would fail whenever the local images were a
+different build — which they nearly always are. Resolving both sides remotely
+makes the check independent of local state, so it holds from any checkout, at
+any time, with no images built at all.
+
+The expectation costs four manifest fetches rather than four image pulls:
+`podman manifest add` against a remote reference records that tag's digest
+without pulling layers, so a scratch list is the cheapest way to ask what a tag
+currently resolves to.
+
+**What it does not do.** It cannot make an interrupted run fail on the spot — a
+run that dies before `push-manifests` never reaches the check either. It
+converts that case from unnoticed-until-someone-pulls into red on the next run,
+and gives a human a one-command answer in between.
+
+**Dependency.** This is the only target that needs `jq`, taken as an overridable
+`JQ` like `PODMAN` and `AWK`, but unqualified rather than absolute because jq's
+install location genuinely varies across the platforms this repo is used on.
+Parsing `podman manifest inspect` output with a regex would read the JSON by
+luck rather than by structure, and a read that silently returned nothing would
+compare empty to empty and pass — so the extraction is shape-checked to exactly
+`amd64` and `arm64` before any comparison happens.
 
 ---
 

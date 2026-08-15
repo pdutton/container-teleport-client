@@ -21,6 +21,14 @@ TELEPORT_VERSION := 18.10.4
 AWK      ?= /usr/bin/awk
 PODMAN   ?= /usr/bin/podman
 
+# Unqualified where AWK and PODMAN are absolute, deliberately: jq's install
+# location genuinely varies (/usr/bin on Debian and the GitHub runners,
+# /usr/sbin on some Fedora-derived layouts, /opt/homebrew/bin on macOS), so an
+# absolute default would be wrong somewhere common. Used only by
+# check-published, which parses `podman manifest inspect` output -- JSON that a
+# regex would read by luck rather than by structure.
+JQ       ?= jq
+
 # Registry the push target publishes to. Override to retarget:
 # `make push REGISTRY=ghcr.io/pdutton`
 #
@@ -210,7 +218,8 @@ TAG_SET_SH = case "$$version" in \
 .DEFAULT_GOAL := help
 .PHONY: help build build-arch build-image stamp-image check-readme test \
         test-arch test-image manifests manifest-variant push push-arch \
-        push-image push-manifests push-manifest-variant clean
+        push-image push-manifests push-manifest-variant check-published \
+        check-published-variant clean
 
 help:
 	@echo "Targets:"
@@ -218,6 +227,11 @@ help:
 	@echo "  test    Smoke-test all four images (builds first)"
 	@echo "  push    Publish the four arch tags and the ten lists to $(REGISTRY)/$(IMAGE) (builds and tests first)"
 	@echo "  clean   Remove every tag and manifest list this repo applies"
+	@echo
+	@echo "  check-published VERSION=X.Y.Z"
+	@echo "          Read the registry back and assert every published list points at"
+	@echo "          the arch images published beside it. Needs no local images; runs"
+	@echo "          at the end of push, and standalone whenever you want to know."
 	@echo
 	@echo "Variants (one Containerfile, gated on the INCLUDE_TCTL build arg):"
 	@echo "  tsh     tsh alone     -> latest, 18, 18.10, $(TELEPORT_VERSION), tsh"
@@ -433,11 +447,16 @@ test-image:
 # the two leaves the lists pointing at the previous members while the arch tags
 # are already new. Re-running repairs it. This is the failure mode D15 names,
 # and it is why the workflow does not cancel in-progress runs on master.
+# check-published closes the loop: it reads back what actually landed rather
+# than trusting that the pushes above reported success. VERSION is passed
+# explicitly because that target reads only the registry and will not fall back
+# to a local image.
 push: test
 	@$(MAKE) --no-print-directory push-arch ARCH=amd64
 	@$(MAKE) --no-print-directory push-arch ARCH=arm64
 	@$(MAKE) --no-print-directory manifests
 	@$(MAKE) --no-print-directory push-manifests
+	@set -eu; $(MAKE) --no-print-directory check-published VERSION="$(call READ_VERSION,tsh)"
 
 push-arch:
 	@set -eu; $(REQUIRE_ARCH_SH)
@@ -486,6 +505,86 @@ push-manifest-variant:
 	  echo "Pushing $(REGISTRY)/$(IMAGE):$$t (manifest list)"; \
 	  $(PODMAN) manifest push --all "$(LOCAL_IMAGE):$$t" "docker://$(REGISTRY)/$(IMAGE):$$t"; \
 	done
+
+# ---- verifying what is actually published -----------------------------------
+# Asserts that every published list points at exactly the architecture images
+# published beside it -- not merely that it has two members of the right
+# architectures, which a list left stale by an interrupted run also has.
+#
+# Both sides are resolved from the registry, and that is the load-bearing
+# choice. Comparing a published list against the locally assembled one would
+# report a mismatch whenever the local images are a different build, which they
+# almost always are: the created and revision labels alone give a local build
+# different digests from CI's. Reading both sides remotely makes this meaningful
+# at any time, from any checkout, with no local images at all -- including long
+# after the run that published them.
+#
+# `podman manifest add` against a remote reference fetches that image's manifest
+# and records its digest; it does not pull layers. A scratch list is therefore
+# the cheapest way to ask what digest a tag currently has, and it is how the
+# expectation is built.
+#
+# Scope, stated plainly: this catches a list that was published wrong, a tag
+# that never landed, and a list left pointing at a previous run's members. It
+# does not, on its own, make an interrupted run fail -- a run that dies before
+# push-manifests never reaches this either. What it gives that case is
+# detection on the next run, or whenever a human runs it.
+CHECK_SCRATCH = $(LOCAL_IMAGE)-check-scratch
+
+# Shell snippet. Given $ref, sets $members to that reference's "arch digest"
+# pairs, sorted, one per line -- and fails loudly if the result is not exactly
+# the two architectures this repo publishes. Without that shape check a read
+# that silently returned nothing would compare empty to empty and pass.
+#
+# podman's stderr is dropped because its failure here is expected and enormous:
+# asked to inspect a plain image as a list it prints the entire manifest blob
+# into the error string. The shape check below reports the same fact in one
+# line. The cost is that a network or auth failure also arrives as an empty
+# read, so the message names that possibility rather than asserting which
+# happened.
+MANIFEST_MEMBERS_SH = members="$$($(PODMAN) manifest inspect "$$ref" 2>/dev/null \
+                        | $(JQ) -r '.manifests[] | "\(.platform.architecture) \(.digest)"' \
+                        | sort)"; \
+                      got="$$(echo "$$members" | $(AWK) 'NF{print $$1}' | paste -sd, -)"; \
+                      [ "$$got" = "amd64,arm64" ] || { \
+                        echo "FAIL: $$ref did not read back as a manifest list of exactly amd64+arm64 (got '$$got')." >&2; \
+                        echo "      Either it is not a list -- a plain image under that name -- or the registry could not be read." >&2; \
+                        exit 1; \
+                      }
+
+check-published:
+	@$(MAKE) --no-print-directory check-published-variant VARIANT=tsh   VERSION="$(VERSION)"
+	@$(MAKE) --no-print-directory check-published-variant VARIANT=admin VERSION="$(VERSION)"
+
+# VERSION is required, not read back: this target is about the registry and must
+# not depend on a local image existing at all.
+check-published-variant:
+	@set -eu; $(REQUIRE_VARIANT_SH)
+	@set -eu; \
+	version="$(VERSION)"; \
+	[ -n "$$version" ] || { \
+	  echo "ERROR: check-published-variant needs VERSION=X.Y.Z; it reads only the registry and has no image to read one off." >&2; \
+	  exit 1; \
+	}; \
+	$(TAG_SET_SH); \
+	base="$(BASE_TAG_$(VARIANT))"; \
+	$(PODMAN) manifest exists "$(CHECK_SCRATCH)" 2>/dev/null && $(PODMAN) manifest rm "$(CHECK_SCRATCH)" >/dev/null || true; \
+	$(PODMAN) manifest create "$(CHECK_SCRATCH)" >/dev/null; \
+	$(PODMAN) manifest add "$(CHECK_SCRATCH)" "$(REGISTRY)/$(IMAGE):$$base-amd64" >/dev/null; \
+	$(PODMAN) manifest add "$(CHECK_SCRATCH)" "$(REGISTRY)/$(IMAGE):$$base-arm64" >/dev/null; \
+	ref="$(CHECK_SCRATCH)"; $(MANIFEST_MEMBERS_SH); \
+	expected="$$members"; \
+	$(PODMAN) manifest rm "$(CHECK_SCRATCH)" >/dev/null; \
+	for t in $$tags; do \
+	  ref="$(REGISTRY)/$(IMAGE):$$t"; $(MANIFEST_MEMBERS_SH); \
+	  [ "$$members" = "$$expected" ] || { \
+	    echo "FAIL: $(REGISTRY)/$(IMAGE):$$t does not point at the published $$base-amd64/$$base-arm64 images" >&2; \
+	    echo "  published list:" >&2; echo "$$members"   | sed 's/^/    /' >&2; \
+	    echo "  arch tags:"      >&2; echo "$$expected"  | sed 's/^/    /' >&2; \
+	    exit 1; \
+	  }; \
+	done; \
+	echo "Verified $(VARIANT): $$tags all point at $$base-amd64 + $$base-arm64"
 
 # Removes the ten lists and four arch images this repo applies, across both
 # variants. `podman push SOURCE DESTINATION` never creates a registry-qualified
