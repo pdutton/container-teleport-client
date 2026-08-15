@@ -68,6 +68,16 @@ jobs:
           # The absolute path was never load-bearing here: the Makefile takes
           # PODMAN and AWK as overridable variables precisely so a caller can
           # say where its tools are. CI is such a caller, and now says so.
+          #
+          # This is `command -v`, the caller's PATH, where the Makefile itself
+          # uses `command -pv` and refuses to fall back to a PATH lookup. The
+          # difference is deliberate and it is where the trust boundary sits:
+          # the Makefile will not let an ambient PATH choose which podman
+          # publishes images, but it does honour a path handed to it. Resolving
+          # here has to use the wider search, because the runner keeps podman
+          # in /usr/local/bin, outside the default PATH the Makefile consults.
+          # What is trusted is the runner image, which is also what supplies
+          # the podman being resolved.
           PODMAN="$(command -v podman)"
           AWK="$(command -v awk)"
           test -n "$PODMAN" || { echo "ERROR: podman not on PATH after install" >&2; exit 1; }

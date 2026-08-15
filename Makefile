@@ -18,16 +18,35 @@ IMAGE    ?= teleport-client
 TELEPORT_VERSION := 18.10.4
 
 # External tools, overridable: `make PODMAN=/usr/local/bin/podman build`
-AWK      ?= /usr/bin/awk
-PODMAN   ?= /usr/bin/podman
+#
+# Resolved rather than hardcoded, because these live in different places on
+# different systems -- podman moved off /usr/bin on the GitHub runners mid-2026,
+# and jq sits in /usr/bin on Debian, /usr/sbin on some merged-/usr layouts and
+# /opt/homebrew/bin on macOS -- so any single absolute default is wrong
+# somewhere common.
+#
+# `command -pv` and not `command -v`: -p searches the system's *default* PATH
+# rather than the caller's. Every recipe here runs podman against images that
+# get published, so which binary that name resolves to is a trust decision, and
+# a PATH entry is not a trustworthy way to make it. The recipes must never fall
+# back to a PATH lookup for the same reason -- an inherited PATH is exactly the
+# thing being routed around, so an unfound tool is an error, never a bare name
+# left for the shell to resolve later.
+#
+# A path passed in explicitly is different: that is a deliberate choice by
+# whoever ran make, not an ambient one. CI uses it, because the runners keep
+# podman outside the default PATH.
+AWK_PATH    := $(shell command -pv awk)
+PODMAN_PATH := $(shell command -pv podman)
+JQ_PATH     := $(shell command -pv jq)
 
-# Unqualified where AWK and PODMAN are absolute, deliberately: jq's install
-# location genuinely varies (/usr/bin on Debian and the GitHub runners,
-# /usr/sbin on some Fedora-derived layouts, /opt/homebrew/bin on macOS), so an
-# absolute default would be wrong somewhere common. Used only by
-# check-published, which parses `podman manifest inspect` output -- JSON that a
-# regex would read by luck rather than by structure.
-JQ       ?= jq
+# Recursive (`?=`), so a missing tool fails when a recipe actually needs it
+# rather than when make parses this file. `make help` and `make clean` should
+# still work on a machine that has never installed jq, which only
+# check-published uses.
+AWK      ?= $(if $(AWK_PATH),$(AWK_PATH),$(error ERROR: awk not found in the default PATH ($(shell getconf PATH)); pass AWK=/path/to/awk))
+PODMAN   ?= $(if $(PODMAN_PATH),$(PODMAN_PATH),$(error ERROR: podman not found in the default PATH ($(shell getconf PATH)); pass PODMAN=/path/to/podman))
+JQ       ?= $(if $(JQ_PATH),$(JQ_PATH),$(error ERROR: jq not found in the default PATH ($(shell getconf PATH)); pass JQ=/path/to/jq))
 
 # Registry the push target publishes to. Override to retarget:
 # `make push REGISTRY=ghcr.io/pdutton`

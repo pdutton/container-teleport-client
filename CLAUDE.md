@@ -182,9 +182,24 @@ into caught on the next run.
 
 `podman manifest add` against a remote reference records that tag's digest
 without pulling layers, so building the expectation costs four manifest fetches
-rather than four image pulls. This is the one target that needs `jq`; the
-Makefile takes it as `JQ`, unqualified rather than absolute because jq's
-install location genuinely varies.
+rather than four image pulls. This is the one target that needs `jq`.
+
+`AWK`, `PODMAN` and `JQ` are resolved with `command -pv`, not hardcoded and not
+looked up on the caller's `PATH`. The `-p` is the point: it searches the
+system's default PATH, so an inherited or tampered `PATH` cannot decide which
+podman publishes your images. **There is deliberately no fallback to a bare
+name** — that would hand resolution straight back to `PATH` and undo the whole
+thing. A tool that is not found is an error.
+
+The error is deferred rather than raised at parse time (the variables are
+recursive, so `$(error …)` fires on first expansion): `make help` and
+`make clean` still work on a machine that has never installed jq, which only
+`check-published` uses.
+
+An explicit override is the escape hatch and is different in kind — a path
+passed in is a deliberate decision by whoever ran make, not an ambient one:
+`make PODMAN=/usr/local/bin/podman build`. CI uses it, because the runners keep
+podman outside the default PATH.
 
 `tsh` and `tctl` are aliases of `latest` and `admin`. That is not the same
 mistake as an `ubuntu` tag would be: a tag earns its keep when a sibling name
